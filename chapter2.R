@@ -163,12 +163,12 @@ posterior_new
 # P(A|+ve test) = P(+ve test | A) * P(A) / P(+ve test)
 # P(+ve test) = P(+ve test |A) * P(A) + P(+ve test | B) * P(B)
 p_pve_test <- 0.8 * 0.5 + 0.65 * 0.5
-p_a_pve_test <- 0.65 * 0.5 / p_pve_test
-# 0.448
+p_a_pve_test <- 0.8 * 0.5 / p_pve_test
+# 0.551
 p_a_pve_test
 
 # part 2, rather than use 0.5 as priors, use 0.36 and 0.64
 p_pve_test <- 0.8 * 0.36 + 0.65 * 0.64
-p_a_pve_test <- 0.65 * 0.36 / p_pve_test
-# 0.332, so the probability has lowered
+p_a_pve_test <- 0.8 * 0.36 / p_pve_test
+# 0.409, so the probability has lowered
 p_a_pve_test
