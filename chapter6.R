@@ -877,10 +877,11 @@ drawdag(dag_6h3)
 # It doesn't seem unreasonable to believe that the area affects the group size
 # But that doesn't explain everything :
 # Why doesn't increasing the amount of food available increase the wolves weight?
-# Why doesn't increasing the area increase their weight?
+# Why doesn't increasing the area increase their weight? Can at least remove this edge
+#  but would be nice to have a causal explanation
 # Why is group sizes effect so low?
 # Why are area and group size effected?
 # Can this be explained by:
-#  - redrawing diagram (adding path from A to G)
+#  - redrawing diagram (adding path from A to G, removing F->W, blocking A to W through a collider maybe?)
 #  - adding group number in some way?
 #  - adding unobserved latent variable?

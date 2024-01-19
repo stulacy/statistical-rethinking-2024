@@ -300,6 +300,28 @@ plot(sim_dat$M, colMeans(s), ylim=c(-2, 2), type='l',
 shade(apply(s, 2, PI), sim_dat$M)
 mtext("Total counterfactual effect of M on D")
 
+# However, couldn't we just have got this effect from the coefficient of M
+# from the multivariate model with A as a predictor (same as holding age constant)?
+# So the slope from the counter factual plot is -0.067571
+lm(colMeans(s) ~ sim_dat$M)
+# Which seems to be the same as the -0.07 value from the model, so yes there's no need to do this
+# counterfactual business for this effect!
+precis(m5.3_A)
+
+# And 
+quap(
+    alist(
+        ## A -> D <- M
+        D ~ dnorm(mu, sigma),
+        mu <- a + bM*M + bA*A,
+        a ~ dnorm(0, 0.2),
+        bM ~ dnorm(0, 0.5),
+        bA ~ dnorm(0, 0.5),
+        sigma ~ dexp(1),
+    ),
+    data=d
+)
+
 # NB: often not possible to produce un-confounded causal effect
 # But this technique is still useful
 
