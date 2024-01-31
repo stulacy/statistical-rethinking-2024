@@ -459,7 +459,11 @@ plot(coeftab(m5.3, m5.3t))
 # 7E2: coin lands up 70% of the time
 # definition is -sum(p_i * log(p_i)) across all possible events i
 # Here 0.250
--sum(0.7 * log(0.7))
+probs <- c(0.7)
+-sum(probs * log(probs))
+# Oh no, should actually account for the opposite case
+probs <- c(0.7, 0.3)
+-sum(probs * log(probs))
 
 # 7E3: 1.38
 probs <- c(0.2, 0.25, 0.25, 0.3)
@@ -567,3 +571,312 @@ cbind(
 # likelihood and no matter the data aren't able to have much effect.
 
 # 7H1
+data(Laffer)
+head(Laffer)
+# Doesn't look linear!
+plot(Laffer$tax_rate, Laffer$tax_revenue)
+
+# Try spline model, straight line
+# How is there a country with -ve tax revenue?
+# Will z-standardize first
+Laffer$rate_z <- scale(Laffer$tax_rate)
+Laffer$revenue_z <- scale(Laffer$tax_revenue)
+
+plot(Laffer$rate_z, Laffer$revenue_z)
+
+# First linear model as baseline
+# Just try narrow priors
+m7h1_lin <- quap(
+    alist(
+        revenue_z ~ dnorm(mu, sigma),
+        mu <- a + b * rate_z,
+        a ~ dnorm(0, 0.5),
+        b ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ),
+    data=Laffer
+)
+
+# That'll do...
+postcheck(m7h1_lin)
+
+# Now for poly with k=2
+m7h1_poly2 <- quap(
+    alist(
+        revenue_z ~ dnorm(mu, sigma),
+        mu <- a + b1 * rate_z + b2 * rate_z^2,
+        a ~ dnorm(0, 0.5),
+        c(b1, b2) ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ),
+    data=Laffer
+)
+postcheck(m7h1_poly2)
+
+# And with poly with k=3
+m7h1_poly3 <- quap(
+    alist(
+        revenue_z ~ dnorm(mu, sigma),
+        mu <- a + b1 * rate_z + b2 * rate_z^2 + b3 * rate_z^3,
+        a ~ dnorm(0, 0.5),
+        c(b1, b2, b3) ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ),
+    data=Laffer
+)
+postcheck(m7h1_poly3)
+
+# Now plot all values on same axes
+mods <- list("linear"=m7h1_lin, "poly2"=m7h1_poly2, "poly3"=m7h1_poly3)
+x_seq <- seq(min(Laffer$rate_z)-0.15, max(Laffer$rate_z)+0.15, length.out=100)
+res <- map_dfr(mods, function(mod) {
+    mu <- link(mod, data=list(rate_z=x_seq))
+    mu_mean <- colMeans(mu)
+    mu_pi <- apply(mu, 2, PI)
+    pred <- sim(mod, data=list(rate_z=x_seq))
+    sim_pi <- apply(pred, 2, PI)
+    tibble(mu=mu_mean, mu_lower=mu_pi[1, ], mu_upper=mu_pi[2, ],
+           sim_lower=sim_pi[1, ], sim_upper=sim_pi[2, ],
+           x=x_seq)
+}, .id="model")
+# Linear looks OK tbh. Polynomial doesn't add much, poly2 is OK except for the outlier
+res |>
+    ggplot(aes(x=x, y=mu)) +
+        geom_ribbon(aes(ymin=sim_lower, ymax=sim_upper), alpha=0.4) +
+        geom_ribbon(aes(ymin=mu_lower, ymax=mu_upper), alpha=0.3) +
+        geom_line() +
+        geom_point(aes(x=rate_z, y=revenue_z), data=Laffer) +
+        theme_minimal() +
+        facet_wrap(~model)
+    
+# On WAIC the quadratic is prefered, but not a huge difference to linear
+# I conclude that the relationship is mostly linear with a lot of variance
+compare(m7h1_lin, m7h1_poly2, m7h1_poly3)
+
+# 7H2
+psis <- PSIS(m7h1_poly2, pointwise=TRUE)
+# There's 2 outliers, but the first is the massive one with revenue at 3.69z,
+# which has a k of 3!
+# The value with negative tax revenue is also an outlier with k=1.06
+psis |>
+    cbind(Laffer) |>
+    arrange(desc(k))
+
+# Try again with robust regression, Student with 2DOF
+m7h1_lin_robust <- quap(
+    alist(
+        revenue_z ~ dstudent(2, mu, sigma),
+        mu <- a + b * rate_z,
+        a ~ dnorm(0, 0.5),
+        b ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ),
+    data=Laffer
+)
+m7h1_poly2_robust <- quap(
+    alist(
+        revenue_z ~ dstudent(2, mu, sigma),
+        mu <- a + b1 * rate_z + b2 * rate_z^2,
+        a ~ dnorm(0, 0.5),
+        c(b1, b2) ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ),
+    data=Laffer
+)
+m7h1_poly3_robust <- quap(
+    alist(
+        revenue_z ~ dstudent(2, mu, sigma),
+        mu <- a + b1 * rate_z + b2 * rate_z^2 + b3 * rate_z^3,
+        a ~ dnorm(0, 0.5),
+        c(b1, b2, b3) ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ),
+    data=Laffer
+)
+
+# Actually looks worse in the sense that have more values outside of the CIs!
+mods <- list("linear"=m7h1_lin_robust, "poly2"=m7h1_poly2_robust, "poly3"=m7h1_poly3_robust)
+x_seq <- seq(min(Laffer$rate_z)-0.15, max(Laffer$rate_z)+0.15, length.out=100)
+res <- map_dfr(mods, function(mod) {
+    mu <- link(mod, data=list(rate_z=x_seq))
+    mu_mean <- colMeans(mu)
+    mu_pi <- apply(mu, 2, PI)
+    pred <- sim(mod, data=list(rate_z=x_seq))
+    sim_pi <- apply(pred, 2, PI)
+    tibble(mu=mu_mean, mu_lower=mu_pi[1, ], mu_upper=mu_pi[2, ],
+           sim_lower=sim_pi[1, ], sim_upper=sim_pi[2, ],
+           x=x_seq)
+}, .id="model")
+res |>
+    ggplot(aes(x=x, y=mu)) +
+        geom_ribbon(aes(ymin=sim_lower, ymax=sim_upper), alpha=0.4) +
+        geom_ribbon(aes(ymin=mu_lower, ymax=mu_upper), alpha=0.3) +
+        geom_line() +
+        geom_point(aes(x=rate_z, y=revenue_z), data=Laffer) +
+        theme_minimal() +
+        facet_wrap(~model)
+
+# Doesn't change the ordering at all...
+compare(m7h1_lin_robust, m7h1_poly2_robust, m7h1_poly3_robust)
+
+# But it does reduce the outliers so have much more sensible k-values
+# So the model fit is better in terms of WAIC/PSIS, but visually looks worse as
+# are less pulled towards outlier
+PSIS(m7h1_poly2_robust, pointwise=TRUE) |>
+    cbind(Laffer) |>
+    arrange(desc(k))
+
+# For the robust regression it allows for smaller sigma, bigger intercept although
+# the slope barely changed surprisingly, I thought it'd be less steep
+plot(coeftab(m7h1_lin, m7h1_lin_robust))
+
+# 7h3
+df <- tribble(
+    ~Species, ~Island1, ~Island2, ~Island3,
+    "A", 0.2, 0.8, 0.05,
+    "B", 0.2, 0.1, 0.15,
+    "C", 0.2, 0.05, 0.7,
+    "D", 0.2, 0.025, 0.05,
+    "E", 0.2, 0.025, 0.05
+) |>
+    pivot_longer(-Species, names_pattern="Island([0-9])", names_to="Island", values_to="prop")
+df
+
+# Each island's proportions sum to 1 as expected
+df |> 
+    group_by(Island) |>
+    summarise(sum(prop))
+
+# Calculate each island's entropy
+entropy <- function(probs) -sum(probs * log(probs))
+
+# Island 1 has most entropy, i.e. most uncertainty as it's a uniform split
+df |> 
+    group_by(Island) |>
+    summarise(entropy(prop))
+
+# Calculating all pairwise KLs
+# NB: NOT SYMMETRICAL
+KL <- function(p, q) sum(p*(log(p)-log(q)))
+
+# KL measures "average difference", so want to minimize this
+# So 3 and 1 are most similar
+# Technically 3 predicts 1 the best, then 1 predicting 3
+# While 2 & 3 are the worst (I guess because 2 has 0.8 for A while 3 has 0.7 for C)
+df |>
+    rename(Island1=Island, prop1=prop) |>
+    full_join(df |> rename(Island2=Island, prop2=prop), relationship="many-to-many",
+              by="Species") |>
+    group_by(Island1, Island2) |>
+    filter(Island1 != Island2) |>
+    summarise(kl=KL(prop1, prop2)) |>
+    arrange(kl)
+
+# 7H4
+d <- sim_happiness(seed=1977, N_years=1000)
+d2 <- d[d$age > 17, ]
+d2$A <- (d2$age - 18) / (65 - 18)
+d2$mid <- d2$married + 1
+# mu = alpha[married] + bA * Age
+m6.9 <- quap(
+    alist(
+        happiness ~ dnorm(mu, sigma),
+        mu <- a[mid] + bA*A,
+        a[mid] ~ dnorm(0, 1),
+        bA ~ dnorm(0, 2),
+        sigma ~ dexp(1)
+    ), data=d2
+)
+# mu = alpha + bA * Age
+m6.10 <- quap(
+    alist(
+        happiness ~ dnorm(mu, sigma),
+        mu <- a + bA*A,
+        a ~ dnorm(0, 1),
+        bA ~ dnorm(0, 2),
+        sigma ~ dexp(1)
+    ), data=d2
+)
+
+# The model with age & marriage in gives better predictions
+# But the model with just age gives more realistic causal inference
+# as marriage is a collider!
+# However, since there is an association between marriage and the outcome,
+# of course we get better predictions
+# Predictions and causal inference are orthogonal concepts
+compare(m6.9, m6.10, func=PSIS)
+
+# 7H5
+data(foxes)
+d <- foxes
+d$F <- scale(d$avgfood)
+d$A <- scale(d$area)
+d$G <- scale(d$groupsize)
+d$W <- scale(d$weight)
+summary(d)
+
+m7h5_1 <- quap(
+    alist(
+        W ~ dnorm(mu, sigma),
+        mu <- a + bF * F + bG * G + bA * A,
+        a ~ dnorm(0, 0.2),
+        c(bF, bG, bA) ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ), 
+    data=d
+)
+
+m7h5_2 <- quap(
+    alist(
+        W ~ dnorm(mu, sigma),
+        mu <- a + bF * F + bG * G,
+        a ~ dnorm(0, 0.2),
+        c(bF, bG) ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ), 
+    data=d
+)
+
+m7h5_3 <- quap(
+    alist(
+        W ~ dnorm(mu, sigma),
+        mu <- a + bG * G + bA * A,
+        a ~ dnorm(0, 0.2),
+        c(bG, bA) ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ), 
+    data=d
+)
+
+m7h5_4 <- quap(
+    alist(
+        W ~ dnorm(mu, sigma),
+        mu <- a + bF * F,
+        a ~ dnorm(0, 0.2),
+        c(bF) ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ), 
+    data=d
+)
+
+m7h5_5 <- quap(
+    alist(
+        W ~ dnorm(mu, sigma),
+        mu <- a + bA * A,
+        a ~ dnorm(0, 0.2),
+        c(bA) ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ), 
+    data=d
+)
+
+# There's basically no difference between models 1-3
+# I.e. those that have groupsize in are equally best
+# Then the final 2, that are just F and A are substantially worse
+# So GROUP SIZE is the most important influencer on weight
+#   1 F + G + A
+#   2 F + G
+#   3 G + A
+#   4 F
+#   5 A
+compare(m7h5_1, m7h5_2, m7h5_3, m7h5_4, m7h5_5)
