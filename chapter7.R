@@ -476,7 +476,8 @@ probs <- c(0.3, 0.3, 0.3)
 -sum(probs * log(probs))
 
 # 7M1: Definitions of AIC and WAIC including their assumptions
-# AIC: -2lppd + 2p (p = # parameters)
+# AIC: -2lppd + 2p (p = # parameters): ACTUALLY NO, rather than lppd it's deviance on training data
+# using MAP rather than the full distribution like lppd does
 #   Assumes:
 #      - priors are flat (or overwhelmed by likelihood) (not realistic, espec for multilevel)
 #      - posterior is approx multivariate Gaussian

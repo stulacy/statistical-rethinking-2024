@@ -446,6 +446,159 @@ compare(m8.5, m8.6)
 # 8E1
 # 1) temperature (yeast has a stronger effect at higher temps)
 # 2) education and job type, the more educated you are in a higher paying field the more you earn
-# 3) 
+# 3) throttle - the more throttle the stronger the effect of gas?
 
+# 8E2
+# 1, don't think any others (more ORs rather than ANDs)
 
+# 8E3
+# caramelising = heat + moisture + heat * moisture
+
+# 8M1
+# Need cool temperature AND water AND shade
+
+# 8M2
+# blooms = (1 - Hot) * (alpha + b_1 * light + b_2 * moisture + b_12 * light * moisture)
+
+# 8M3
+# Not really an interaction as don't have a third variable, just a bivariate relationship
+# Could simulate a dataset as wolves <- rnorm(10, 50, 10), ravens <- rnorm(10, wolves*10, 20)
+# Probably not linear as many biological phenomena are multiplicative. Can think concretely
+# about this as saying that the addition of each wolf increases implicatively the number
+# of ravens
+
+# 8M4
+data(tulips)
+d <- tulips
+d$blooms_std <- d$blooms / max(d$blooms)
+d$water_cent <- d$water - mean(d$water)
+d$shade_cent <- d$shade - mean(d$shade)
+
+# 2 models:
+#   water & shade
+#   water & shade & interaction
+# Original models
+m8.5 <- quap(
+    alist(
+        blooms_std ~ dnorm(mu, sigma),
+        mu <- a + bw*water_cent + bs*shade_cent,
+        a ~ dnorm(0.5, 0.25),
+        bw ~ dnorm(0, 0.25),
+        bs ~ dnorm(0, 0.25),
+        sigma ~ dexp(1)
+    ),
+    data=d
+)
+m8.6 <- quap(
+    alist(
+        blooms_std ~ dnorm(mu, sigma),
+        mu <- a + bw*water_cent + bs*shade_cent + bws*water_cent*shade_cent,
+        a ~ dnorm(0.5, 0.25),
+        bw ~ dnorm(0, 0.25),
+        bs ~ dnorm(0, 0.25),
+        bws ~ dnorm(0, 0.25),
+        sigma ~ dexp(1)
+    ),
+    data=d
+)
+# Had to increase bws variance to fit
+m8.6_constrained <- quap(
+    alist(
+        blooms_std ~ dnorm(mu, sigma),
+        mu <- a + bw*water_cent - bs*shade_cent + bws*water_cent*shade_cent,
+        a ~ dnorm(0.5, 0.25),
+        bw ~ dexp(1),
+        bs ~ dexp(1),
+        bws ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ),
+    data=d
+)
+precis(m8.6_constrained)
+
+# Prior predictive
+shades <- c(-1, 0, 1)
+waters <- c(-1, 0, 1)
+models <- list("No interaction"=m8.5, "Interaction"=m8.6, "Interaction constrained"=m8.6_constrained)
+stats <- map_dfr(models, function(mod) {
+    prior <- extract.prior(mod)
+    map_dfr(shades, function(s) {
+        post <- link(mod, post=prior, data=tibble(water_cent=waters, shade_cent=s))
+        colnames(post) <- paste0("water_", waters)
+        post <- as_tibble(post)
+        post |>
+            mutate(obs = row_number()) |>
+            pivot_longer(-obs, names_pattern="water_([0-9-]+)", names_to="water_cent", values_to="blooms_std") |>
+            mutate(water_cent = as.numeric(water_cent),
+                   shade_cent=s) |>
+            filter(obs <= 20)
+    }
+    )
+}, .id="model")
+
+# Has much stronger effect now!
+d |>
+    ggplot(aes(x=water_cent, y=blooms_std)) +
+        geom_line(aes(group=obs), alpha=0.3, data=stats) +
+        geom_line(aes(group=obs), alpha=1, linewidth=1, data=stats |> filter(obs==17)) +
+        geom_hline(yintercept = 1, linetype="dashed") +
+        geom_hline(yintercept = 0, linetype="dashed") +
+        geom_point() +
+        facet_grid(model~shade_cent) +
+        theme_bw() +
+        scale_colour_discrete("") +
+        scale_fill_discrete("") +
+        theme(legend.position = "bottom")
+
+# Previously the interaction was negative only, while now it is forced to be positive
+# I think this is because I've forced a negative b_shade by forcing the coefficient itself positive
+# but sticking a negative sign in front of it in the regression
+# And indeed bs is -0.11 in the free model and 0.11 in the constrained model (with negative sign)
+# The shade and water slopes are pretty much the exact same value in the constrained
+# So why is this happening?
+
+plot(coeftab(m8.6, m8.6_constrained))
+# a + bw*water_cent - bs*shade_cent + bws*water_cent*shade_cent
+# If water is +ve but shade is -ve then for an average water & shade we get average blooms (a)
+# I.e. b0 = a
+# If water increases by 1 and shade decreases by 1 then our output is:
+# b1 = a + bw*1 - bs*-1 + bws*1*-1  
+# b1 = a + bw + bs - bws  
+# b1 > b0
+# a + bw + bs - bws > a
+# bw + bs - bws > 0
+# bw + bs > bws
+post <- extract.samples(m8.6_constrained)
+# And yep this is always met!
+mean((post$bw + post$bs) > post$bws)
+
+# Can we determine that the interaction prior will always be negative from this?
+# Or is this just enough for the prior, that it will be less than bw + bs?
+
+# 8H1
+summary(d$bed)
+# Include bed as categorical intercept
+d$bid <- as.integer(as.factor(d$bed))
+m8h1 <- quap(
+    alist(
+        blooms_std ~ dnorm(mu, sigma),
+        mu <- a[bid] + bw*water_cent + bs*shade_cent + bws*water_cent*shade_cent,
+        a[bid] ~ dnorm(0.5, 0.25),
+        bw ~ dnorm(0, 0.25),
+        bs ~ dnorm(0, 0.25),
+        bws ~ dnorm(0, 0.25),
+        sigma ~ dexp(1)
+    ),
+    data=d
+)
+
+# 8H2
+# Slightly better predictions when using bed, although massive standard error (because so few points?)
+compare(m8h1, m8.6)
+
+# The bed coefficients aren't that different, the slopes are the same, sigma is the same
+# The original intercept looks the average of the 3 beds
+# So the main benefit is just adding a bit more observation specific variance, but not a huge difference
+plot(coeftab(m8h1, m8.6))
+
+# 8H3
