@@ -1,5 +1,6 @@
 library(rethinking)
 library(tidyverse)
+library(patchwork)
 
 data(rugged)
 d <- rugged
@@ -502,6 +503,7 @@ m8.6 <- quap(
     data=d
 )
 # Had to increase bws variance to fit
+set.seed(17)
 m8.6_constrained <- quap(
     alist(
         blooms_std ~ dnorm(mu, sigma),
@@ -602,3 +604,416 @@ compare(m8h1, m8.6)
 plot(coeftab(m8h1, m8.6))
 
 # 8H3
+# a)
+# Book says m8.5 but think should be m8.4
+data(rugged)
+d <- rugged
+d$log_gdp <- log(d$rgdppc_2000)
+dd <- d[complete.cases(d$rgdppc_2000), ]
+dd$log_gdp_std <- dd$log_gdp / mean(dd$log_gdp)
+dd$rugged_std <- dd$rugged / max(dd$rugged)
+dd$cid <- ifelse(dd$cont_africa == 1, 1, 2)
+dd$cid_fact <- factor(dd$cid, levels=c(1, 2), labels=c("Africa", "Not Africa")) 
+m8.4 <- quap(
+    alist(
+        log_gdp_std ~ dnorm(mu, sigma),
+        mu <- a[cid] + b[cid]*(rugged_std - rugged_bar),
+        a[cid] ~ dnorm(1, 0.1),
+        b[cid] ~ dnorm(0, 0.3),
+        sigma ~ dexp(1)
+    ),
+    data=dd
+)
+
+psis <- PSIS(m8.4, pointwise=TRUE)
+# Other outliers are:
+#  - Switzerland (very high rugged for its log GDP outside of Africa which has 
+# negative relationship)
+#  - Lesotho (lower GDP than would expect from ruggedness)
+#  - Tajikstan (much lower GDP than would expect from ruggedness outside of Africa)
+mu.NotAfrica <- link(m8.4, data=data.frame(cid=2, rugged_std=rugged.seq))
+mu.Africa <- link(m8.4, data=data.frame(cid=1, rugged_std=rugged.seq))
+
+mu.NotAfrica_mu <- colMeans(mu.NotAfrica)
+mu.NotAfrica_ci <- apply(mu.NotAfrica, 2, PI, prob=0.97)
+mu.Africa_mu <- colMeans(mu.Africa)
+mu.Africa_ci <- apply(mu.Africa, 2, PI, prob=0.97)
+
+stats <- tibble(
+    mean = c(mu.NotAfrica_mu, mu.Africa_mu),
+    lower = c(mu.NotAfrica_ci[1, ], mu.Africa_ci[1, ]),
+    upper = c(mu.NotAfrica_ci[2, ], mu.Africa_ci[2, ]),
+    cid_fact = factor(rep(c(2, 1), each=50), levels=c(1, 2), labels=c("Africa", "Not Africa")),
+    rugged_std = rep(rugged.seq, 2)
+)
+
+p1 <- dd |> 
+    select(country, cid_fact, rugged_std, log_gdp_std) |>
+    ggplot(aes(x=rugged_std, colour=cid_fact, fill=cid_fact)) +
+        geom_ribbon(aes(ymin=lower, ymax=upper), data=stats, alpha=0.3) +
+        geom_point(aes(y=log_gdp_std)) +
+        geom_line(aes(y=mean), data=stats) +
+        geom_text(aes(y=log_gdp_std, label=country), data=dd |> mutate(k = psis$k) |> filter(k > 0.4)) +
+        scale_colour_discrete("") +
+        scale_fill_discrete("") +
+        labs(title="Index variable on intercept") +
+        theme_minimal() +
+        theme(legend.position = "bottom")
+p1
+
+# b) Using robust regression:
+m8.4_robust <- quap(
+    alist(
+        log_gdp_std ~ dstudent(2, mu, sigma),
+        mu <- a[cid] + b[cid]*(rugged_std - rugged_bar),
+        a[cid] ~ dnorm(1, 0.1),
+        b[cid] ~ dnorm(0, 0.3),
+        sigma ~ dexp(1)
+    ),
+    data=dd
+)
+psis <- PSIS(m8.4_robust, pointwise=TRUE)
+mu.NotAfrica <- link(m8.4_robust, data=data.frame(cid=2, rugged_std=rugged.seq))
+mu.Africa <- link(m8.4_robust, data=data.frame(cid=1, rugged_std=rugged.seq))
+
+mu.NotAfrica_mu <- colMeans(mu.NotAfrica)
+mu.NotAfrica_ci <- apply(mu.NotAfrica, 2, PI, prob=0.97)
+mu.Africa_mu <- colMeans(mu.Africa)
+mu.Africa_ci <- apply(mu.Africa, 2, PI, prob=0.97)
+
+stats <- tibble(
+    mean = c(mu.NotAfrica_mu, mu.Africa_mu),
+    lower = c(mu.NotAfrica_ci[1, ], mu.Africa_ci[1, ]),
+    upper = c(mu.NotAfrica_ci[2, ], mu.Africa_ci[2, ]),
+    cid_fact = factor(rep(c(2, 1), each=50), levels=c(1, 2), labels=c("Africa", "Not Africa")),
+    rugged_std = rep(rugged.seq, 2)
+)
+
+# Now there are no outliers!
+p2 <- dd |> 
+    select(country, cid_fact, rugged_std, log_gdp_std) |>
+    ggplot(aes(x=rugged_std, colour=cid_fact, fill=cid_fact)) +
+        geom_ribbon(aes(ymin=lower, ymax=upper), data=stats, alpha=0.3) +
+        geom_point(aes(y=log_gdp_std)) +
+        geom_line(aes(y=mean), data=stats) +
+        geom_text(aes(y=log_gdp_std, label=country), data=dd |> mutate(k = psis$k) |> filter(k > 0.4)) +
+        scale_colour_discrete("") +
+        scale_fill_discrete("") +
+        labs(title="Index variable on intercept") +
+        theme_minimal() +
+        theme(legend.position = "bottom")
+p2
+# Now all k values are < 0.32 
+# Where even is Seychelles on this?
+dd |>
+    select(country) |>
+    mutate(k = psis$k) |>
+    arrange(desc(k)) |>
+    as_tibble()
+# Down to 0.118 now!
+dd |>
+    as_tibble() |>
+    select(country) |>
+    mutate(k = psis$k) |>
+    filter(country == 'Seychelles')
+
+# Notice that the Not Africa slope is more extreme now, while
+# the Africa one hasn't changed much
+p1 | p2
+
+# Looking on this scale and actually the slopes have barely changed, so
+# robust regression hasn't substantially changed the interpretation
+plot(coeftab(m8.4, m8.4_robust))
+
+# H84
+data("nettle")
+d <- as_tibble(nettle)
+d
+summary(d)
+# Hypothesis: language diversity is function of food security
+# Languages per capita as outcome
+d$lang_per_capita <- d$num.lang / d$k.pop
+d$loglang <- log(d$lang_per_capita)
+d$loglang_scale <- d$loglang / mean(d$loglang)
+# This gives value in [0-1.7] that is roughly normally distributed
+dens(d$loglang_scale)
+# Mean growing season
+# Z-score should be sufficient
+dens(scale(d$mean.growing.season))
+d$mean_scale <- scale(d$mean.growing.season)
+# Growing season is very skewed, even under Z-transform!
+dens(scale(d$sd.growing.season))
+# See here's the raw value
+dens(d$sd.growing.season)
+# I think a log transform is better here
+# Ah but 2 values have SD of 0 so log becomes infinite
+dens(log(d$sd.growing.season))
+# So maybe just scaling 0-1 is best here
+dens(d$sd.growing.season / max(d$sd.growing.season)) 
+d$sd_scale <- d$sd.growing.season / max(d$sd.growing.season)
+# Now for Area
+# Log Area gives very big values, the units of area must be such that they are very big
+# and there are several orders of magnitude difference
+dens(log(d$area))
+# Yep can see that's the case in the raw plot
+dens(d$area)
+# standardized log area should be useful
+dens(scale(log(d$area)))
+d$area_scale <- scale(log(d$area))
+
+# Use log of this as outcome to constrain positive
+# mean growing season & sd of this, both main effects & interaction
+# Need to decide sensible priors
+# Whether to use WAIC
+# a) lang ~ mean growing
+# For priors then, when mean growing is at 0 (mean), we'd expect outcome
+# to be mean too (1).  Outcome has range 0-2 so N(1, 0.5) is quite tight but gives realistic values
+# For slope Growing season can value from -2 to 2, so max rise/run is 2/4 or 0.5. 
+# So N(0, 0.25) should be fine
+m_h84_1 <- quap(
+    alist(
+        loglang_scale ~ dnorm(mu, sigma),
+        mu <- a + bM * mean_scale,
+        a ~ dnorm(1, 0.5),
+        bM ~ dnorm(0, 0.25),
+        sigma ~ dexp(1)
+    ), data=d
+)
+# The intercept is around 1 as expected
+# The slope is actually negative, so as the farming season increases, the number
+# of languages spoken per capita decreases. This is counter to what the hypothesis was
+plot(precis(m_h84_1))
+
+# b) Accounting for area
+# prior on area is scale[-3,3] so max rise/run of 2/6 or 0.3,
+# Will just use N(0, 0.25) to be safe and consistent
+m_h84_2 <- quap(
+    alist(
+        loglang_scale ~ dnorm(mu, sigma),
+        mu <- a + bM * mean_scale + bA * area_scale,
+        a ~ dnorm(1, 0.5),
+        bM ~ dnorm(0, 0.25),
+        bA ~ dnorm(0, 0.25),
+        sigma ~ dexp(1)
+    ), data=d
+)
+# This doesn't change the effect of growing season but area is slighly positive
+# So when we condition on the size of the country, the length of the growing season
+# still has a negative impact on the number of languages
+plot(coeftab(m_h84_1, m_h84_2))
+
+# c) lang ~ sd growing
+# SD of growing season. Here the hypothesis is that this is negatively associated,
+# as the more variable the growing season, the more you need bigger communities for resilience
+# and hence fewer languages
+# For a prior this just goes from 0-1 so max rise/run is 2/1 =2, so will use prior of N(0, 1)
+m_h84_3 <- quap(
+    alist(
+        loglang_scale ~ dnorm(mu, sigma),
+        mu <- a + bS * sd_scale,
+        a ~ dnorm(1, 0.5),
+        bS ~ dnorm(0, 1),
+        sigma ~ dexp(1)
+    ), data=d
+)
+# Lots of uncertainty here, but bS is positive, the opposite of what was theorized!
+plot(precis(m_h84_3))
+
+# d) lang ~ sd growing + log(area)
+m_h84_4 <- quap(
+    alist(
+        loglang_scale ~ dnorm(mu, sigma),
+        mu <- a + bS * sd_scale + bA * area_scale,
+        a ~ dnorm(1, 0.5),
+        bS ~ dnorm(0, 1),
+        bA ~ dnorm(0, 0.25),
+        sigma ~ dexp(1)
+    ), data=d
+)
+
+# Again area has a slight positive effect, but this hasn't really done much to bS except to
+# make it less certain and overlap with 0
+plot(coeftab(m_h84_3, m_h84_4))
+
+# e) lang ~ mean growing * sd growing
+m_h84_5 <- quap(
+    alist(
+        loglang_scale ~ dnorm(mu, sigma),
+        mu <- a + bM * mean_scale + bS * sd_scale + bMS * mean_scale * sd_scale,
+        a ~ dnorm(1, 0.5),
+        bM ~ dnorm(0, 0.25),
+        bS ~ dnorm(0, 1),
+        bMS ~ dnorm(0, 1),
+        sigma ~ dexp(1)
+    ), data=d
+)
+
+# This doesn't change the signs on the Mean and SD params
+# The interaction is positive, so if the mean growing season increases, then you get more languages
+# if there is more variance in growing seasons (how does this work in practice?!)
+plot(coeftab(m_h84_1, m_h84_3, m_h84_5))
+
+# The model with interactions gives best WAIC by some way (look at penalty)
+# SD has lowest WAIC, seems that Mean contributes more
+compare(m_h84_1, m_h84_2, m_h84_3, m_h84_4, m_h84_5)
+
+# 8H5
+data("Wines2012") 
+d <- Wines2012 |> as_tibble()
+summary(d)
+head(d)
+nrow(d)
+# model score ~ judge + wine
+# Score is normal so will just z-transform
+dens(d$score)
+d$score_scale <- scale(d$score)
+# Create index variables for judge and wine
+d$judge_ind <- as.integer(as.factor(d$judge))
+d$wine_ind <- as.integer(as.factor(d$wine))
+# Scores range from -3 - 3
+# Priors are intercepts, so want average on 0 (average standardized score)
+# And max range -3 - 3 so N(0, 1.5)
+dens(d$score_scale)
+m_h85 <- quap(
+    alist(
+        score_scale ~ dnorm(mu, sigma),
+        mu <- J[judge_ind] + W[wine_ind],
+        J[judge_ind] ~ dnorm(0, 1.5),
+        W[wine_ind] ~ dnorm(0, 1.5),
+        sigma ~ dexp(1)
+    ),
+    data=d
+)
+
+# Wine 18 looks to be the worst, with wine 4 just about the best
+plot(precis(m_h85, depth=2, pars=c("W")))
+# There is a lot of variance among judges! 8 is the harshest, nearly giving 1SD below the 
+# average judge, with 5 the highest scoring.
+plot(precis(m_h85, depth=2, pars=c("J")))
+# Looks like more variation between wines than judges!
+
+# 8H6
+# Create index variables
+d$colour_ind <- as.integer(as.factor(d$flight))  # Red=1, White=2
+d$wine_country_ind <- as.integer(as.factor(d$wine.amer))  # French=1, American=2
+d$judge_country_ind <- as.integer(as.factor(d$judge.amer))  # French=1, American=2
+# Model with same priors
+m_h86 <- quap(
+    alist(
+        score_scale ~ dnorm(mu, sigma),
+        mu <- C[colour_ind] + WC[wine_country_ind] + JC[judge_country_ind],
+        C[colour_ind] ~ dnorm(0, 1.5),
+        WC[wine_country_ind] ~ dnorm(0, 1.5),
+        JC[judge_country_ind] ~ dnorm(0, 1.5),
+        sigma ~ dexp(1)
+    ),
+    data=d
+)
+# No real effect!
+# I.e. judges scores are not biased in terms of where they are from, the colour of the wine
+# Or the location of the wine. This is generally good and what we'd hope to find!
+# This gives us confidence in the previous model that some wines are really better than others
+# And the judges just have their own natural 'average' score that is independent of these factors
+plot(precis(m_h86, depth=2))
+
+# NB: The model is very sensitive to priors!
+# If I use smaller priors, say 0.1, then we get smaller standard errors on this scale
+# This is because there is relatively limited data
+# But the megnitudes are generally the same, and there isn't any coefficient
+# that doesn't have zero in its interval
+m_h86_tighter <- quap(
+    alist(
+        score_scale ~ dnorm(mu, sigma),
+        mu <- C[colour_ind] + WC[wine_country_ind] + JC[judge_country_ind],
+        C[colour_ind] ~ dnorm(0, 0.1),
+        WC[wine_country_ind] ~ dnorm(0, 0.1),
+        JC[judge_country_ind] ~ dnorm(0, 0.1),
+        sigma ~ dexp(1)
+    ),
+    data=d
+)
+plot(coeftab(m_h86, m_h86_tighter))
+
+# If we were to read into these small effect sizes, we'd see that the American judges (JC=2)
+# give slightly higher scores than french judges (JC=1), but American wines get slightly lower
+# scores (WC=2) than French wines (WC=1)
+
+# 8H7
+# All 2-way interactions
+# Will revert back to index variables for this
+# Think model will struggle without sensible priors!
+d$colour_red <- as.integer(d$flight == 'red')
+# Index prior all have the same interpretation - the _additional_ impact on score
+# of the '1' value. So really this should be between -3, 3 (i.e. N(0, 1.5) as used before)
+# but probably want to keep a bit tighter to help estimates so will use 0.5
+m_h87 <- quap(
+    alist(
+        score_scale ~ dnorm(mu, sigma),
+        mu <- C * colour_red + WC * wine.amer + JC * judge.amer + CWC * colour_red * wine.amer + CJC * colour_red * judge.amer + WCJC * wine.amer * judge.amer,
+        C ~ dnorm(0, 0.5),
+        WC ~ dnorm(0, 0.5),
+        JC ~ dnorm(0, 0.5),
+        CWC ~ dnorm(0, 0.5),
+        CJC ~ dnorm(0, 0.5),
+        WCJC ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ),
+    data=d
+)
+# Ok interesting...
+# Red wine seems to score slightly higher than white (not seen before)
+# American wine seems to score slightly lower than French (seen in last model)
+# American judges seems to score slightly higher than French (seen in last model)
+# As for the interactions, CWC is the most significant by far!
+# So the effect of red wine and american is extra negative, so red wine scores well,
+# American scores badly, but red AND american do extra worse
+plot(precis(m_h87))
+
+# Quickly note that the Prior doesn't seem to impact indicator variables as much!
+# Below I show that with N(0, 1.5) there's barely any difference
+# I suspect this is due to needing to estimate fewer values
+# Ideally if you were using index variables for a lot of categorical data you'd use 
+# a multi-level model to pool the priors
+m_h87_wider <- quap(
+    alist(
+        score_scale ~ dnorm(mu, sigma),
+        mu <- C * colour_red + WC * wine.amer + JC * judge.amer + CWC * colour_red * wine.amer + CJC * colour_red * judge.amer + WCJC * wine.amer * judge.amer,
+        C ~ dnorm(0, 1.5),
+        WC ~ dnorm(0, 1.5),
+        JC ~ dnorm(0, 1.5),
+        CWC ~ dnorm(0, 1.5),
+        CJC ~ dnorm(0, 1.5),
+        WCJC ~ dnorm(0, 1.5),
+        sigma ~ dexp(1)
+    ),
+    data=d
+)
+plot(coeftab(m_h87, m_h87_wider))
+
+# Now to look at the model through the lens of predictions, not just the coefficients
+# Colour by colour
+# x-axis is wine country
+# Facet is judge country
+in_data <- expand_grid(colour_red=c(0, 1), wine.amer=c(0, 1), judge.amer=c(0, 1))
+mu <- link(m_h87, data=in_data)
+
+# Can see this visually:
+# Red wines tend to do better than white for France,
+# But American whites fare better than their reds
+# And American judges are slightly more positive all round
+in_data |>
+    mutate(mean = colMeans(mu),
+           lower = apply(mu, 2, PI)[1, ],
+           upper = apply(mu, 2, PI)[2, ],
+           colour=factor(colour_red, labels=c("White", "Red")),
+           country=factor(wine.amer, labels=c("France", "America")),
+           judge=factor(judge.amer, labels=c("France", "America"))
+    ) |>
+    ggplot(aes(x=country, y=mean, colour=colour)) +
+        geom_point() +
+        geom_errorbar(aes(ymin=lower, ymax=upper)) +
+        facet_wrap(~judge) +
+        theme_bw() +
+        scale_colour_manual("", values=c("Green", "Red")) +
+        guides(colour="none") +
+        labs(x="Wine country", y="Predicted score (z)")
