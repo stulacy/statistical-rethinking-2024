@@ -167,7 +167,6 @@ plot(precis(diffs))
 pl <- by(d$pulled_left, list(d$actor, d$treatment), mean)
 dim(pl)
 
-# TODO reproduce this plot myself rather than using base R for the data wrangling + plotting
 ndata <- expand_grid(actor=unique(d$actor), treatment=unique(d$treatment))
 post <- link(m11.4, data=ndata)
 # Is there any difference between sim and link for binomial?
@@ -494,7 +493,7 @@ dens(foo)
 # measurement scale, or < 1 in log scale.
 # Then have massive tail from the high variance
 # Ideally want something with a flatter peak and far less tail
-mean(foo < 1)
+mean(foo < 0.5)
 
 # If reduce the variance we get something that looks a lot better
 # But the mode is still around 1, ideally would be a bit higher
@@ -689,6 +688,8 @@ lambda_new <- exp(post$a + post$b)
 # which is < 1.5 books a day from the first monastery
 precis(data.frame(lambda_old, lambda_new))
 
+
+# Multinomial -------------------------------------------------------------
 # 11.3.1 Predictors matched to outcomes -----------------------------------
 # career choice example with simulated data
 N <- 500              # number of individuals
@@ -852,3 +853,871 @@ exp(k['a1']) / (exp(k['a1']) + exp(k['a2']))
 
 # This example was for binary, but same principle holds for multinomial
 # Can be computationally quicker to run
+
+
+# Problems ----------------------------------------------------------------
+# 11E1: 
+# prob to log-odds is logit
+logit(0.35)
+# NB: logit(0.5) = 0
+logit(0.5)
+
+# 11E2: Inverse logit is log odds to prob
+inv_logit(3.2)
+
+# 11E3: Exponentiating gives proportional odds!
+# So a five-fold increase, which is ginormous
+exp(1.7)
+
+# 11E4: Offsets are used if the rows contain counts over different time/spatial-scales
+# effectively to normalise them
+
+# 11M1: Good question... something to do with how the Binomial likelihood behaves with
+# multiple trials? Ideally would write it out
+
+# 11M2: 1.7 implies an exp(1.7) = 5.47 multiplicative change in outcome
+
+# 11M3: Because we want the p parameter of a Binomial to be [0, 1]
+
+# 11M4: Because we want the rate parameter of a Poisson to be > 0
+
+# 11M5: We have a counting process where the rate can't be > 1.
+# However, this doesn't mean we never observe counts > 1
+# So where would the rate be constrained < 1?
+
+# 11M6: Binomial have max entropy when each outcome must have 1 of 2
+# outcomes, and probability is constant (with respect to predictor vars)
+# Poisson is when output is discrete positive value with constant rate
+
+# 11M7: 
+m11.4_quap <- quap(
+    alist(
+        pulled_left ~ dbinom(1, p),
+        logit(p) <- a[actor] + b[treatment],  # NB: varying intercept for each actor
+        a[actor] ~ dnorm(0, 1.5),
+        b[treatment] ~ dnorm(0, 0.5)
+    ), data=data_list
+)
+# There aren't really any differences... I'm not sure what the question is expecting
+plot(coeftab(m11.4, m11.4_quap))
+
+m11.4_wide_ulam <- ulam(
+    alist(
+        pulled_left ~ dbinom(1, p),
+        logit(p) <- a[actor] + b[treatment],  # NB: varying intercept for each actor
+        a[actor] ~ dnorm(0, 1.5),
+        b[treatment] ~ dnorm(0, 0.5)
+    ), data=data_list, chains=4, cores=4
+)
+
+m11.4_wide_quap <- quap(
+    alist(
+        pulled_left ~ dbinom(1, p),
+        logit(p) <- a[actor] + b[treatment],  # NB: varying intercept for each actor
+        a[actor] ~ dnorm(0, 1.5),
+        b[treatment] ~ dnorm(0, 0.5)
+    ), data=data_list
+)
+
+# Still no real differences...
+plot(coeftab(m11.4_wide_quap, m11.4_wide_ulam))
+
+# 11M8
+# Dropping Hawaii and refitting
+d <- Kline |> filter(culture != 'Hawaii')
+d$P <- scale(log(d$population))
+d$contact_id <- ifelse(d$contact == 'high', 2, 1)
+
+# Going to fit the interaction model & intercept only (1 intercept, not varying by contact id)
+dat <- list(
+    T = d$total_tools,
+    P = d$P,
+    cid = d$contact_id
+)
+m11.10_sans_hawaii <- ulam(
+    alist(
+        T ~ dpois(lambda),
+        log(lambda) <- a[cid] + b[cid] * P,
+        a[cid] ~ dnorm(3, 0.5),
+        b[cid] ~ dnorm(0, 0.2)
+    ), data=dat, chains=4, log_lik=TRUE
+)
+
+# Can't compare directly to the original m11.10 as have different outcomes
+k <- PSIS(m11.10_sans_hawaii, pointwise=TRUE)$k
+
+plot_kline_posterior <- function(mod) {
+    plot(dat$P, dat$T, xlab="Log pop (std)", ylab="totla tools",
+         col=rangi2, pch=ifelse(dat$cid == 1, 1, 16), lwd=2,
+         ylim=c(0, 75), cex=1+normalize(k))
+    # Set up horizontal axis values to compare predictions at
+    ns <- 100
+    P_seq <- seq(from=min(dat$P)-0.15, to=max(dat$P)+0.15, length.out=ns)
+    
+    # Predictions for low contact
+    lambda <- link(mod, data=tibble(P=P_seq, cid=1))
+    lmu <- colMeans(lambda)
+    lci <- apply(lambda, 2, PI)
+    lines(P_seq, lmu, lty=2, lwd=1.5)
+    shade(lci, P_seq, xpd=TRUE)
+    
+    # Predictions for high contact
+    lambda <- link(mod, data=tibble(P=P_seq, cid=2))
+    lmu <- colMeans(lambda)
+    lci <- apply(lambda, 2, PI)
+    lines(P_seq, lmu, lty=1, lwd=1.5)
+    shade(lci, P_seq, xpd=TRUE)
+}
+
+plot_kline_posterior(m11.10_sans_hawaii)
+plot_kline_posterior(m11.10)
+
+# Low contact looks better, but high still has outliers!
+# At least high contact is always predicted to be higher tool usage than 
+# low tool countries now and the low-contact line is a lot flatter
+
+# Still have Tonga and Yap with high k
+d |>
+    mutate(k=k) |>
+    arrange(desc(k))
+
+# It looks like these were always present to some extent (Tonga was highest with 0.92)
+PSIS(m11.10, pointwise=TRUE)$k
+
+# Actually looks ok? Hawaii was within the PIs before
+# Case 6 (Trobriand) still poorly predicted
+postcheck(m11.10)
+postcheck(m11.10_sans_hawaii)
+
+# Now see the scientific model sans Hawaii
+dat2 <- list(T=d$total_tools, P=d$population, cid=d$contact_id)
+
+m11.11_sans_hawaii <- ulam(
+    alist(
+        T ~ dpois(lambda),
+        lambda <- exp(a[cid]) * P^b[cid]/g,
+        a[cid] ~ dnorm(1, 1),
+        b[cid] ~ dexp(1),
+        g ~ dexp(1)
+    ), data=dat2, chains=4, log_lik=TRUE
+)
+
+# The scientific model is again better by WAIC
+compare(m11.10_sans_hawaii, m11.11_sans_hawaii)
+
+# 11H1: Use PSIS to compare chimpanzee model (m11.4) with simpler models
+# m11.1: intercept only
+# m11.2: intercept + treatment (wide prior)
+# m11.3: intercept + treatment (tighter prior)
+# m11.4: varying intercept + treatment (tighter prior)
+# The model with actor specific intercept fares far better
+# Implies that each actor has a very different baseline probability of pulling
+# left lever
+compare(m11.1, m11.2, m11.3, m11.4_quap)
+
+# 11H2: 
+library(MASS)
+data("eagles")
+eagles <- as_tibble(eagles)
+# Each row is a record of different victim-pirate pairs
+# 5 columns:
+#   - y: number of successful attempts
+#   - n: total number of attempts
+#   - P: whether pirate was large or not
+#   - V: whether victim was large
+#   - A: whether pirate was adult
+eagles
+# Convert factors into dummy vars
+eagles <- eagles |>
+    mutate(
+        P = as.integer(factor(P, levels=c('S', 'L')))-1,
+        V = as.integer(factor(V, levels=c('S', 'L')))-1,
+        A = as.integer(factor(A, levels=c('I', 'A')))-1
+    )
+
+# Fit model with indicator variables first (so baseline intercept)
+m11h2_quap <- quap(
+    alist(
+        y ~ dbinom(n, p),
+        logit(p) <- a + bP*P + bV*V + bA*A,
+        a ~ dnorm(0, 1.5),
+        c(bP, bV, bA) ~ dnorm(0, 0.5)
+    ), data=eagles
+)
+
+m11h2_ulam <- ulam(
+    alist(
+        y ~ dbinom(n, p),
+        logit(p) <- a + bP*P + bV*V + bA*A,
+        a ~ dnorm(0, 1.5),
+        c(bP, bV, bA) ~ dnorm(0, 0.5)
+    ), data=eagles, chains=4, cores=4
+)
+
+# a) Is the quadratic approximation OK? Yep agrees very well with ulam!
+plot(coeftab(m11h2_quap, m11h2_ulam))
+
+# b) Interpret estimates: If pirate is big, victim is small, and pirate is adult
+# are all associated with higher chance of success
+# plot posterior predictions. want to see the predicted probability of
+# success with its 89% interval for each row, as well as the predicted success
+# count and its 89% interval
+# The first part is asking for the link value, and the second for sim
+mu <- link(m11h2_quap)
+mu_mean <- colMeans(mu)
+mu_PI <- apply(mu, 2, PI)
+
+preds <- sim(m11h2_quap)
+preds_mean <- colMeans(preds)
+preds_PI <- apply(preds, 2, PI)
+
+# Now how to plot?
+# Rather than plot for each row I'd probably sweep across all permutations of inputs
+# But plotting as requested and we don't seem to have enough variability in the model
+# I.e. cases 2&4 had a perfect success rate, with p > the PI for these cases, and
+# the actual number of values just on the top of the interval (this should be rarer!)
+# Likewise case 7 had a 0% success rate which was far below the p PI, and even the 
+# outcome y was well below the PI
+# What's the difference in information between p and y?
+# p is the average prediction, while y allows for the variance in the Binomial
+# How you would use their information content differently I'm not sure
+# I guess you'd want to get the mean as close as possible (low bias) rather than
+# try to optimise for y (low variance)
+eagles2 <- eagles |>
+    mutate(
+        p_raw = y / n,
+        p_mod = mu_mean,
+        p_lower = mu_PI[1, ],
+        p_upper = mu_PI[2, ],
+        y_mod = preds_mean,
+        y_lower = preds_PI[1, ],
+        y_upper = preds_PI[2, ],
+        i = row_number()
+    ) |>
+    rename(y_raw = y) |>
+    pivot_longer(c(starts_with("y_"), starts_with("p_")),
+                 names_pattern = "([yp])_([a-z]+)",
+                 names_to=c("var", "type")) |>
+    pivot_wider(names_from=type, values_from=value) 
+
+eagles2 |>
+    ggplot(aes(x=i)) +
+        geom_point(aes(y=raw), colour="orange", size=2) +
+        geom_point(aes(y=mod), colour="steelblue", size=2) +
+        geom_errorbar(aes(ymin=lower, y=mod, ymax=upper), colour="steelblue") +
+        facet_wrap(~var, scales="free", ncol=2)
+
+# Let's see if this is to do with any of the inputs
+# So just plotting the same data but rearranged to see if we can see a pattern 
+# I will just use p
+# NB: The dataset has every 8 combination of predictors so can just all plot together
+# This suggests that an interaction is in order:
+# It looks like Pirate has a smaller effect when the victim is Big, as would expect
+# (thus interaction?)
+# It also seems like Victim size and Adult have an interaction too, as when
+# have a small adult but infant predator have 25%-100% success rate depending
+# on whether predator is big
+# But when have adult predator success rates jump to near 100% regardless of predator size
+eagles2 |>
+    filter(var == 'p') |>
+    mutate(
+        A = factor(A, levels=c(0, 1), labels=c("Young", "Adult")),
+        P = factor(P, levels=c(0, 1), labels=c("Small Pirate", "Big Pirate")),
+        V = factor(V, levels=c(1, 0), labels=c("Big Victim", "Small Victim"))
+    ) |>
+    ggplot(aes(x=P)) +
+        geom_point(aes(y=raw), colour="orange", size=2) +
+        geom_point(aes(y=mod), colour="steelblue", size=2) +
+        geom_errorbar(aes(ymin=lower, y=mod, ymax=upper), colour="steelblue") +
+        facet_grid(A~V)
+
+# c) Been asked to model interaction between pirate size and age, which is not
+# the interaction I was going for
+# I will actually try all 2-way interactions and see which is most predictive
+m11h2_AV <- quap(
+    alist(
+        y ~ dbinom(n, p),
+        logit(p) <- a + bP*P + bV*V + bA*A + bAV*A*V,
+        a ~ dnorm(0, 1.5),
+        c(bP, bV, bA, bAV) ~ dnorm(0, 0.5)
+    ), data=eagles
+)
+m11h2_AP <- quap(
+    alist(
+        y ~ dbinom(n, p),
+        logit(p) <- a + bP*P + bV*V + bA*A + bAP*A*P,
+        a ~ dnorm(0, 1.5),
+        c(bP, bV, bA, bAP) ~ dnorm(0, 0.5)
+    ), data=eagles
+)
+m11h2_VP <- quap(
+    alist(
+        y ~ dbinom(n, p),
+        logit(p) <- a + bP*P + bV*V + bA*A + bVP*V*P,
+        a ~ dnorm(0, 1.5),
+        c(bP, bV, bA, bVP) ~ dnorm(0, 0.5)
+    ), data=eagles
+)
+
+# This gives highest weight to the Size-Victim model, which is what I predicted
+# from my interpretation. Then the Victim-Predator size interaction is next, and the
+# suggested interaction is last.
+compare(m11h2_quap, m11h2_AP, m11h2_AV, m11h2_VP)
+
+# But just thinking about Pirate size and age, this means that if a pirate is big,
+# it has the same likelihood of success whether it's an adult or immature
+
+# 11H3
+data("salamanders")
+salamanders <- as_tibble(salamanders)
+# Have 47 rows where each row is a count from a different area
+# Each row has 4 columns:
+#  - SITE (id)
+#  - SALAMAN (count)
+#  - PCTCOVER (continuous)
+#  - FORESTAGE (continuous)
+# Model using quap
+# What priors?
+# Firstly, what transforms?
+# Keep outcome the same
+# But what about pctcover?
+# Bi-modal (no log) between 0-100
+# Will keep with natural 0, so 0-1
+dens(salamanders$PCTCOVER)
+salamanders$P <- salamanders$PCTCOVER / max(salamanders$PCTCOVER)
+# Max number of salamanders is 13, min is 0, with median of 1
+# So need low rate!
+summary(salamanders)
+
+# So for priors then, hard to really intuit out like for a normal
+# So instead just plot and get a feel for that way
+# For the intercept, don't want more than 20 counts, or 50 at push 
+# Start with N(0, 1)
+foo <- exp(rnorm(1e3, 0, 1))
+# Very tight and very large tail!
+dens(foo)
+# Half the values are < 1, and 94% are < 5
+# Which actually could be ok in this dataset
+mean(foo < 1)
+mean(foo < 5)
+# But perhaps could do with more variance as only 1% of values are > 10
+mean(foo > 10)
+# And max is only 20
+max(foo)
+
+# Setting sd=2 has added too much weight to the tails!
+# Has given us 273 as max counts, no way we'd ever get that many from our study!
+foo <- exp(rnorm(1e3, 0, 2))
+dens(foo)
+mean(foo < 1)
+mean(foo < 5)
+mean(foo > 10)
+max(foo)
+
+# With 1.5 it's still giving far too high outliers
+foo <- exp(rnorm(1e3, 0, 1.5))
+dens(foo)
+mean(foo < 1)
+mean(foo < 5)
+mean(foo > 10)
+max(foo)
+
+# I've gone for 1.2, it has slightly too high tails (would allow for some crazy outliers)
+# but allows for several predictions over 10
+# Ideally I think this would be a zero-inflated model as there's a lot of zeros
+foo <- exp(rnorm(1e3, 0, 1.2))
+dens(foo)
+mean(foo < 1)
+mean(foo < 5)
+mean(foo > 10)
+max(foo)
+
+# Now to identify prior for slope
+plot_prior_sal <- function(a_mu, a_sigma, b_mu, b_sigma, N=100) {
+    a <- rnorm(N, a_mu, a_sigma)
+    b <- rnorm(N, b_mu, b_sigma)
+    plot(NULL, xlim=c(0, 2), ylim=c(0, 100))
+    for (i in 1:N) {
+        curve(exp(a[i] + b[i] * x), add=TRUE, col=grau())
+    }
+}
+# Start off with N(0, 1)
+# Allows for some crazy responses
+plot_prior_sal(0, 1.2, 0, 1)
+
+# N(0, 0.5)
+# That's more sedate, that will do!
+plot_prior_sal(0, 1.2, 0, 0.5)
+
+# Now to fit the model
+m11h3_quap <- quap(
+    alist(
+        SALAMAN ~ dpois(lambda),
+        log(lambda) <- a + bP * P,
+        a ~ dnorm(0, 1.2),
+        bP ~ dnorm(0, 0.5)
+    ), data=salamanders |> dplyr::select(SALAMAN, P)
+)
+
+m11h3_ulam <- ulam(
+    alist(
+        SALAMAN ~ dpois(lambda),
+        log(lambda) <- a + b * P,
+        a ~ dnorm(0, 1.2),
+        b ~ dnorm(0, 0.5)
+    ), data=salamanders |> dplyr::select(SALAMAN, P),
+    chains=4, cores=4
+)
+# Yep quap is OK
+# So as forest cover increases, get higher chance of finding salamanders
+plot(coeftab(m11h3_quap, m11h3_ulam))
+
+# a) Expected counts and 89% vs P
+ndata <- tibble(P=seq(0, 1, length.out=100))
+mu <- link(m11h3_quap, data=ndata)
+mu_mean <- colMeans(mu)
+mu_PI <- apply(mu, 2, PI)
+preds <- sim(m11h3_quap, data=ndata)
+preds_mean <- colMeans(preds)
+preds_PI <- apply(preds, 2, PI)
+# Massive uncertainty!
+# Also why isn't the line continuous? I guess just due to sampling from Poisson?
+# If plotted vs link would be smooth function as that's deterministic
+# Just a poor fit in general!
+# Looks very bimodal as saw in the original counts
+# If have < 75% cover then it's basically one model with its own intercept
+# And above 75% cover I'd use a different rate, although there's a fair amount of 
+# variance there too
+ndata |>
+    mutate(
+        mu=mu_mean,
+        mu_lower = mu_PI[1, ],
+        mu_upper = mu_PI[2, ],
+        pred=preds_mean,
+        pred_lower = preds_PI[1, ],
+        pred_upper = preds_PI[2, ]
+    ) |>
+    ggplot(aes(x=P)) +
+        geom_ribbon(aes(ymin=pred_lower, ymax=pred_upper), alpha=0.3) +
+        geom_ribbon(aes(ymin=mu_lower, ymax=mu_upper), alpha=0.3) +
+        geom_line(aes(y=mu)) +
+        geom_point(aes(y=SALAMAN), data=salamanders)
+
+# b) Now add FORESTAGE
+# This looks skewed so will do log then scale
+dens(salamanders$FORESTAGE)
+# Just need to add 1 as had a zero reading
+dens(scale(log(salamanders$FORESTAGE+1)))
+salamanders$F <- scale(log(salamanders$FORESTAGE+1))
+
+# Will use the same priors
+# Maybe widen them a bit
+m11h3_quap_b <- quap(
+    alist(
+        SALAMAN ~ dpois(lambda),
+        log(lambda) <- a + bP * P + bF * F,
+        a ~ dnorm(0, 1.2),
+        c(bP, bF) ~ dnorm(0, 0.5)
+    ), data=salamanders |> dplyr::select(SALAMAN, P, F)
+)
+# Forest age has minimal difference
+# Looks like having a forest makes a bigger difference than its age
+plot(coeftab(m11h3_quap, m11h3_quap_b))
+
+m11h3_quap_c <- quap(
+    alist(
+        SALAMAN ~ dpois(lambda),
+        log(lambda) <- a + bP * P + bF * F + bPF*P*F,
+        a ~ dnorm(0, 1.2),
+        c(bP, bF, bPF) ~ dnorm(0, 0.5)
+    ), data=salamanders |> dplyr::select(SALAMAN, P, F)
+)
+
+# Is there an interaction?
+# I.e. if have older forests with a lot of coverage do we see a lot more salamanders?
+# Not really, negative if anything!
+plot(coeftab(m11h3_quap, m11h3_quap_b, m11h3_quap_c))
+# Yep simplest model favoured here, age of forest doesn't seem to impact much
+compare(m11h3_quap, m11h3_quap_b, m11h3_quap_c)
+
+# Try a stratified model
+salamanders <- salamanders |>
+    mutate(coverage=as.integer(PCTCOVER > 0.75)+1)
+m11h3_quap_d <- quap(
+    alist(
+        SALAMAN ~ dpois(lambda),
+        log(lambda) <- a[coverage] + bP[coverage] * P,
+        a[coverage] ~ dnorm(0, 1.5),
+        bP[coverage] ~ dnorm(0, 0.5)
+    ), data=salamanders |> dplyr::select(SALAMAN, coverage, P=PCTCOVER)
+)
+precis(m11h3_quap_d, depth=2)
+# Rates of 1 below and 1.3 above, so barely any difference.
+# I find that surprising, I was expecting a much higher slope for the second part
+exp(0.03)
+
+# Ah, this is the most predictive model by WAIC though
+compare(m11h3_quap, m11h3_quap_b, m11h3_quap_c, m11h3_quap_d)
+
+# Does it look a better fit at all?
+# Nope, basically flat!
+# So how does it have better WAIC?
+ndata <- ndata |>
+    mutate(coverage=as.integer(P > 0.75)+1)
+mu <- link(m11h3_quap_d, data=ndata)
+mu_mean <- colMeans(mu)
+mu_PI <- apply(mu, 2, PI)
+preds <- sim(m11h3_quap_d, data=ndata)
+preds_mean <- colMeans(preds)
+preds_PI <- apply(preds, 2, PI)
+ndata |>
+    mutate(
+        mu=mu_mean,
+        mu_lower = mu_PI[1, ],
+        mu_upper = mu_PI[2, ],
+        pred=preds_mean,
+        pred_lower = preds_PI[1, ],
+        pred_upper = preds_PI[2, ]
+    ) |>
+    ggplot(aes(x=P)) +
+        geom_ribbon(aes(ymin=pred_lower, ymax=pred_upper), alpha=0.3) +
+        geom_ribbon(aes(ymin=mu_lower, ymax=mu_upper), alpha=0.3) +
+        geom_line(aes(y=mu)) +
+        geom_point(aes(y=SALAMAN), data=salamanders)
+
+# 11H4
+data("NWOGrants")
+NWOGrants <- NWOGrants |> as_tibble()
+NWOGrants |>
+    head()
+# Have dept/discipline, gender, applications, and number of awards
+# "What are the total and indirect causal effects of gender on grant awards?"
+# Consider mediation path (aka pipe) through discipline
+dag <- dagitty("dag { 
+  awards <- gender -> discipline -> awards;
+}")
+drawdag(dag)
+# For total effects would need both models, a ~ g1 + d, d ~ g2
+# And would simulate first G -> D, then G -> A and D -> A (I've never done this manually,
+# only through sim with the 'vars' argument)
+# For direct effect just want G -> A, but need to condition on D because of the backdoor
+# path, so just model A ~ G + D and look at the coefficient of G
+# So I imagine the indirect effect is G -> D -> A, so just do the same as the total causal
+# effect, but just omit simulating G -> A.
+# What does that mean in practice? Fit the model A ~ G + D, but only simulate the D
+# coefficient? That coefficient only makes sense in the context of having G in the model
+# Maybe I'll just take the difference between the Total and Direct causal effects
+adjustmentSets(dag, exposure="", outcome="awards", effect="direct")
+
+NWOGrants <- NWOGrants |>
+    mutate(
+        gid = as.numeric(factor(gender, levels=c('m', 'f'))),
+        did = as.numeric(discipline)
+    )
+
+m11h4_a <- quap(
+    alist(
+        awards ~ dbinom(applications, p),
+        logit(p) <- a[did] + b[gid],
+        a[did] ~ dnorm(0, 1.5),  # Using same priors as UBCadmit
+        b[gid] ~ dnorm(0, 1.5)
+    ),
+    data=NWOGrants
+)
+# Quite high variance between disciplines
+plot(precis(m11h4_a, depth=2))
+# Let's look at gender contrasts
+post <- extract.samples(m11h4_a)
+# Slightly higher acceptance rate for men, although 3% probability difference
+# in absolute terms is minute
+plot(precis(tibble(m_minus_f=inv_logit(post$b[, 1]) - inv_logit(post$b[, 2]))))
+# That's the direct effect anyway!
+
+# For indirect we need the total as well as the direct, so need to model
+# D ~ G.
+# My first idea was to model the probability of each gender applying to
+# each discipline as a multinomial, but multinomials are awkward
+# with aggregated data, as on each row the discipline isn't a DEPENDENT var,
+# but rather an INDEPENDENT, as we have all permutations of gender & disciplines.
+# The raw counts of disciplines are thus evenly split, giving even modelled probs.
+# Could potentially use applications as a predictor to weight each row,
+# but then it gets weird when it comes time to simulate from this model
+# as we won't know the number of applications in advanced, 
+# because the whole point is the number of applications is a CONSEQUENCE 
+# of gender & discipline, not a PREDICTOR.
+# Instead could expand the data long so that each row is a an application
+# with the outcome being success, and the predictors being discipline & gender
+# Can then model each outcome as a categorical and each awarded as a bernoulli.
+# Only problem is this will take far longer to sample!
+# I'll give it a go
+
+# Prep data into long (1 row per application)
+NWO_long <- pmap_dfr(NWOGrants, function(discipline, gender, applications, awards, gid, did) {
+    df <- tibble(
+        gid=rep(gid, applications),
+        did=rep(did, applications),
+        awarded=0
+    ) 
+    df$awarded[1:awards] <- 1
+    df
+})
+# Looks good!
+NWO_long |>
+    group_by(gid, did) |>
+    summarise(awarded=sum(awarded)) |>
+    arrange(did)
+
+# So now can model each row as being a choice from a categorical for discipline
+# based on sex
+# And can model whether was awarded or not as a bernouili, rather than binomial
+code_m11h4 <- "
+data {
+    int N;  // Number of observations
+    int K;  // Number of possible disciplines
+    int J;  // Number of genders
+    array[N] int discipline;  // outcome1
+    array[N] int awarded;  // outcome2
+    array[N] int gender;  // predictor
+}
+
+parameters {
+    matrix[K, J] a1;   // Intercepts in model 1 (D ~ G)
+    vector[K] a2;      // Intercepts in model 2 (A ~ G + D)
+    vector[J] g2;      // Intercepts in model 2 (A ~ G + D)
+}
+
+model {
+    // Model 1
+    matrix[N, K] s;  // Linear predictor pre link
+    for (i in 1:N) {
+        for (k in 1:K) {
+            s[i, k] = a1[k, gender[i]];
+        }
+    }
+    
+    // Model 2
+    vector[N] p2;
+    p2 = a2[discipline] + g2[gender];
+    
+    // Model 1
+    to_vector(a1) ~ normal(0, 1);
+    for (i in 1:N) {
+        discipline[i] ~ categorical(softmax(to_vector(s[i, ])));
+    }
+    
+    // Model 2
+    awarded ~ bernoulli_logit(p2);
+    a2 ~ normal(0, 1);
+    g2 ~ normal(0, 1);
+}
+"
+dat_list <- list(N=nrow(NWO_long), K=9, J=2, gender=NWO_long$gid,
+                 discipline=NWO_long$did,
+                 awarded=NWO_long$awarded)
+# And fit!
+m11h4 <- stan(model_code=code_m11h4, data=dat_list, chains=4, cores=4)
+# rhat <= 1.02, n_eff is a bit low, but remember we only ran for 1k samples
+# ideally would bump up a bit
+precis(m11h4, depth=3)
+
+# So how do the coefficients for the discipline model compare to the quap model?
+# Pretty well!
+precis(m11h4, depth=2, pars=c("a2", "g2"))
+precis(m11h4_a, depth=2)
+
+# Do the applications per dept by gender seem reasonable?
+post <- extract.samples(m11h4)
+# We have 2,000 samples from 9 disciplines and 2 genders
+dim(post$a1)
+# Need to softmax these for each sample and gender
+ps <- apply(post$a1, c(1, 3), softmax)
+# Here is 1 sample with the 9 disciplines on rows and 2 genders in cols
+ps[, 1,]
+# And the columns sum to 1 as expected
+colSums(ps[, 1, ])
+
+# So now can take mean and PIs
+mu_mean <- apply(ps, c(1, 3), mean)
+mu_pi <- apply(ps, c(1, 3), PI)
+# Can also sample from categorical
+# 2000 x 2
+# Then how to draw PI from categorical?
+sim <- apply(ps, c(2, 3), function(x) {
+    rcategorical(1, x)
+})
+
+NWO_modelled <- as_tibble(mu_mean) |>
+    rename(m=V1, f=V2) |>
+    mutate(did=row_number()) |>
+    pivot_longer(-did, names_to="gender", values_to="p_mean") |>
+    inner_join(
+        tibble(
+            gender='m',
+            p_lower=mu_pi[1, , 1],
+            p_upper=mu_pi[2, , 1],
+            did=1:9
+        ) |>
+            rbind(
+                tibble(
+                    gender='f',
+                    p_lower=mu_pi[1, , 2],
+                    p_upper=mu_pi[2, , 2],
+                    did=1:9
+                ) 
+            ),
+        by=c("gender", "did")
+    ) 
+# The model has (unsurprisingly since it's just an intercept) found the proportions
+# applying to each discipline by gender, and there are indeed some differences
+# between genders, i.e. very few women apply to physics vs men, or indeed physical sciences
+# while women are more represented in the social sciences
+NWO_modelled |>
+    inner_join(NWOGrants, by=c("gender", "did")) |>
+    group_by(gender) |>
+    mutate(prop_applied = applications / sum(applications)) |>
+    ungroup() |>
+    rename(modelled=p_mean, actual=prop_applied) |>
+    pivot_longer(c(modelled, actual)) |>
+    ggplot(aes(x=discipline, y=value, colour=name)) +
+        geom_point(position=position_dodge(width=1)) +
+        geom_errorbar(aes(ymin=p_lower, ymax=p_upper)) +
+        facet_wrap(~gender) +
+        theme_bw() +
+        theme(axis.text.x = element_text(angle=45, hjust=1))
+
+# The question asked for the total indirect effect of gender on awarded
+# This can be determined as the total effect - total direct effect
+
+# Total causal effect:
+# Simulate N men and women, simulate their discipline, then plug these 2 values
+# into the model for awarded
+total_causal <- map_dfr(1:2000, function(i) {
+    map_dfr(1:2, function(g) {
+        # simulate discipline
+        disc_ps <- ps[, i, g]
+        disc <- rcategorical(1, disc_ps)
+        # simulate award
+        p_award <- inv_logit(post$a2[i, disc] + post$g2[i, g])
+        awarded <- rbern(1, p_award)
+        tibble(sim=i, gid=g, did=disc, awarded=awarded)
+    })
+})
+
+# So now, what's the prob of being awarded split by gender?
+# 18.8% Male, 15.6% Female
+# TODO: How to get PI for a categorical outcome?
+# If this was a Gaussian could use quantiles, but here's that's meaningless
+total_causal |>
+    group_by(gid) |>
+    summarise(prop_awarded = mean(awarded))
+
+# And what's the direct effect?
+# 24% for men and 21% for women, how is that larger than the total effect?!
+precis(tibble(male=inv_logit(post$g2[, 1]),
+       female=inv_logit(post$g2[, 2])))
+
+# I think I've misunderstood something here, need to see the solution (TODO)
+
+# M11H5
+dag2 <- dagitty("dag { 
+  career[u];
+  awards <- gender -> discipline -> awards;
+  career -> discipline;
+  career -> awards;
+}")
+coordinates(dag2) <- list(x=c(gender=0, awards=1, discipline=1, career=2),
+                          y=c(gender=0, discipline=0, awards=1, career=0))
+
+# When you condition in discipline it's a collider so it opens the backdoor path through
+# career stage to awards
+drawdag(dag2)
+
+# 11H6
+data("Primates301")
+Primates301 <- as_tibble(Primates301)
+# 301 rows where each row is species
+# Want to investigate how brain size is associatd with social learning
+Primates301
+
+# a) Model number of observations of social learning as function of log brain size
+# Will need to z-scale
+dens(log(Primates301$brain))
+Primates301$log_brain <- as.numeric(scale(log(Primates301$brain)))
+
+# Very long tail!
+dens(Primates301$social_learning)
+summary(Primates301$social_learning)
+
+# Just use weakly informative priors
+# Remember that for the intercept, half the values are below 1 if have
+# normal centered on 0, which seems reasonable for this data
+# It shouldn't matter too much here since we have so much data
+
+# Here's the possible priors using N(0, 1.5) for intercept and
+# N(0, 1) for slope
+# Can see will easily get some very high counts if needed
+plot_prior(0, 1.5, 0, 1)
+
+summary(Primates301)
+m11h6 <- quap(
+    alist(
+        social_learning ~ dpois(lambda),
+        log(lambda) <- a + bBrain * log_brain,
+        a ~ dnorm(0, 1.5),
+        bBrain ~ dnorm(0, 1)
+    ), data=Primates301 |> filter(!is.na(log_brain), !is.na(social_learning))
+)
+# Fits ok
+# Very high coefficient on brain!
+# Intercept: When we're at an average log-brain size
+# The expected number of social learnings is exp(-1.3), or 0.27
+# But for every SD increase in log brain size we get 20 fold increase in # social learnings
+# So the range of social learnings is around 0 for an average or below brain size,
+# but then increases up to around 2*20*0.27 (10)
+plot(precis(m11h6))
+
+# b) Add log research effect
+dens(log(Primates301$research_effort))
+Primates301$log_research <- as.numeric(scale(log(Primates301$research_effort)))
+
+m11h6_b <- quap(
+    alist(
+        social_learning ~ dpois(lambda),
+        log(lambda) <- a + bBrain * log_brain + bResearch * log_research,
+        a ~ dnorm(0, 1.5),
+        c(bBrain, bResearch) ~ dnorm(0, 1)
+    ), data=Primates301 |> filter(!is.na(log_brain), !is.na(social_learning),
+                                  !is.na(log_research))
+)
+# Ah that makes a huge difference in the brain parameter
+# So now brain has a far lower influence on the number of social learnings
+# But of course the amount of research interest should play a role in the number of 
+# social learnings observed. What we really want to model is the PROPORTION of 
+# social learnings per research effort, rather than number
+plot(coeftab(m11h6, m11h6_b))
+
+# c)
+# I would say B -> R, (as researchers are more interested in primates with big brains)
+#             B -> L 
+#             R -> L
+# For the latter 2 there is evidence after conditioning on the other, that each variable
+# does have a direct causal effect on L (although R is stronger by far) 
+# Now to quickly test B->R
+# For priors, max rise/run is 4/4 = 1 (since using both z-scores)
+# And a reasonable prior on slope is could be either way so center on 0,
+# and this would allow for 1 SD change having 2 SD change in output
+# Again, the data is big enough it won't make a huge difference
+m11h6_c <- quap(
+    alist(
+        log_research ~ dnorm(mu, sigma),
+        mu <- a + b * log_brain,
+        a ~ dnorm(0, 1),
+        b ~ dnorm(0, 1),
+        sigma ~ dexp(1)
+    ), data=Primates301 |> filter(!is.na(log_research), !is.na(log_brain))
+)
+# Yep, there is a moderate (0.4) association between brain size and research
+# So I'll stick with the mediation model
+plot(precis(m11h6_c))
+
+     
