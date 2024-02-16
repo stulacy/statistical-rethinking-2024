@@ -559,3 +559,585 @@ p3 <- df |>
 # very little effect, also for some reason those near the bottom
 # I'd be interested to understand why this is the case...
 p1 + p2 + p3
+
+# Problems ----------------------------------------------------------------
+
+# 13E1
+# N(0, 1) produces more shrinkage than N(0, 2)
+
+# 13E2
+# yi ~ Binom(Ni, pi)
+# pi <- a[group[i]] + b*xi
+# a[group[i]] ~ N(a_bar, sigma_a)
+# b ~ N(0, 0.5)
+# a_bar ~ N(0, 1.5)
+# sigma_a ~ Exp(1)
+
+# 13E3
+# yi ~ N(ui, sigma)
+# ui <- a[group[i]] + b*xi
+# a[group[i]] ~ N(a_bar, sigma_a)
+# b ~ N(0, 1)
+# sigma ~ Exp(1)
+# a_bar ~ N(0, 5)
+# sigma_a ~ Exp(1)
+
+# 13E4
+# Poisson regression with varying intercepts
+# yi ~ Pois(lambda)
+# log(lambda) <- a[group[i]] + b*xi
+# a[group[i]] ~ N(a_bar, sigma_a)
+# b ~ N(0, 1)
+# a_bar ~ N(0, 5)
+# sigma_a ~ Exp(1)
+
+# 13E5
+# Poisson regression with 2 different cluster types: a cross-classified model
+# yi ~ Pois(lambda)
+# log(lambda) <- a[group[i]] + g[block[i]] + b*xi
+# a[group[i]] ~ N(a_bar, sigma_a)
+# b[block[i]] ~ N(g_bar, sigma_g)
+# b ~ N(0, 1)
+# a_bar ~ N(0, 5)
+# sigma_a ~ Exp(1)
+# g_bar ~ N(0, 2)
+# sigma_g ~ Exp(1)
+
+# 13M1
+# Add predation and size to varying intercepts
+d <- reedfrogs |> as_tibble()
+d$tank <- 1:nrow(d)
+# Predation is binary so can add as index or indicator var
+table(d$pred)
+# Likewise for size
+table(d$size)
+d$pid <- as.integer(d$pred)
+d$sid <- as.integer(d$size)
+
+# Want to fit 4 models:
+#   - Just size
+#   - Just predation
+#   - Size & predation
+#   - Size & predation & Interaction
+
+m13m1_a <- ulam(
+    alist(
+        S ~ dbinom(N, p),
+        logit(p) <- a[tank] + s[sid],
+        a[tank] ~ dnorm(a_bar, sigma),
+        s[sid] ~ dnorm(0, 1),
+        a_bar ~ dnorm(0, 1.5),
+        sigma ~ dexp(1)
+    ), data=d |> select(S=surv, N=density, tank, sid),
+    chains=4, log_lik=TRUE, cores=4
+)
+
+m13m1_b <- ulam(
+    alist(
+        S ~ dbinom(N, p),
+        logit(p) <- a[tank] + pred[pid],
+        a[tank] ~ dnorm(a_bar, sigma),
+        pred[pid] ~ dnorm(0, 1),
+        a_bar ~ dnorm(0, 1.5),
+        sigma ~ dexp(1)
+    ), data=d |> select(S=surv, N=density, tank, pid),
+    chains=4, log_lik=TRUE, cores=4
+)
+
+m13m1_c <- ulam(
+    alist(
+        S ~ dbinom(N, p),
+        logit(p) <- a[tank] + pred[pid] + s[sid],
+        a[tank] ~ dnorm(a_bar, sigma),
+        pred[pid] ~ dnorm(0, 1),
+        s[sid] ~ dnorm(0, 1),
+        a_bar ~ dnorm(0, 1.5),
+        sigma ~ dexp(1)
+    ), data=d |> select(S=surv, N=density, tank, pid, sid),
+    chains=4, log_lik=TRUE, cores=4
+)
+
+m13m1_d <- ulam(
+    alist(
+        S ~ dbinom(N, p),
+        logit(p) <- a[tank] + pred[pid] + s[sid] + pred[pid] * s[sid],
+        a[tank] ~ dnorm(a_bar, sigma),
+        pred[pid] ~ dnorm(0, 1),
+        s[sid] ~ dnorm(0, 1),
+        a_bar ~ dnorm(0, 1.5),
+        sigma ~ dexp(1)
+    ), data=d |> select(S=surv, N=density, tank, pid, sid),
+    chains=4, log_lik=TRUE, cores=4
+)
+
+# Want to compare on the inferred variation across tanks, this is sigma
+# So it starts off very high at 1.62
+# Doesn't decrease when adding size, but when adding predation it shrinks a lot
+# It then doesn't change much when adding predation & size, or them + their interaction
+# So adding predation removes some of the inter-tank variability
+# So predation is likely a key predictor of survival
+coeftab(m13.2, m13m1_a, m13m1_b, m13m1_c, m13m1_d)
+
+# 13M2
+# So there's minimal predictive difference, although the posteriors for the coefficients changed
+# a lot. This isn't surprising, the additional variation between tanks that is caused by the predation
+# was accounted for by the wider between-group variance (sigma) when predation wasn't included in
+# the model. This doesn't effect the model predictions.
+compare(m13.2, m13m1_a, m13m1_b, m13m1_c, m13m1_d)
+
+# 13M3
+# Refit varying intercept (m13.2) with Cauchy for the group prior
+m13m3 <- ulam(
+    alist(
+        S ~ dbinom(N, p),
+        logit(p) <- a[tank],
+        a[tank] ~ dcauchy(a_bar, sigma),
+        a_bar ~ dnorm(0, 1.5),
+        sigma ~ dexp(1)
+    ), data=d |> select(S=surv, N=density, tank),
+    chains=4, log_lik=TRUE, cores=4
+) 
+
+# Fix divergent errors by using non-centered parameterisation
+# Actually didn't get this warning
+# But the Stan manual has guidance for non-centering Cauchys
+# https://mc-stan.org/docs/stan-users-guide/reparameterization.html#reparameterizing-the-cauchy
+# Basically sample:
+# a_unif ~ uniform(-pi() / 2, pi() / 2)
+# Then transform back with 
+# a = a_bar + sigma * tan(beta_unif)
+# NB: Why has the Stan manual done this in transformed parameters and not generated quantities?
+
+# Anyway let's compare posterior means of intercepts, and then also the a_bar
+# My prediction is that they will have more variance due to the Cauchy's thicker tails
+# Yep get some right outliers at the extremities
+# The Gaussian has each intercept ~ N(1.34, 1.62), so anything beyond
+# 1.36 + 2 * 1.62 = 4.6 (or less than 1.88) is considered a massive outlier
+# So the individual intercepts get shrunk into this range
+# But the Cauchy has thicker tails so there's less shrinkage applied so these 'extreme'
+# values are allowed to be larger
+# In the Cauchy model intercepts are Cauchy(1.47, 1.04)
+# So the variance is lower because it's not needed to be as high with the thicker tails
+# And the mean is higher because there are these 'outliers' at the positive end
+models <- list("Gaussian"=m13.2, "Cauchy"=m13m3)
+map_dfr(models, function(mod) {
+    foo <- precis(mod, depth=2)
+    as_tibble(foo) |>
+        mutate(var = rownames(foo)) |>
+        filter(grepl("^a\\[[0-9]+\\]$", var)) |>
+        select(var, mean)
+}, .id="model") |>
+    pivot_wider(names_from=model, values_from=mean) |>
+    ggplot(aes(x=Gaussian, y=Cauchy)) +
+        geom_point() +
+        geom_abline(intercept=0, slope=1, colour="steelblue")
+
+# 13M4
+# Student t with 2DOF. 
+# The cauchy is Student t with 1DOF
+# The Cauchy has thicker tails, so will expect student t to be inbetween
+# Gaussian and Cauchy
+plot(dstudent(seq(-10, 10, length.out=1e3), nu=1),type="l")
+lines(dstudent(seq(-10, 10, length.out=1e3), nu=2), col="red")
+m13m4 <- ulam(
+    alist(
+        S ~ dbinom(N, p),
+        logit(p) <- a[tank],
+        a[tank] ~ dstudent(2, a_bar, sigma),
+        a_bar ~ dnorm(0, 1.5),
+        sigma ~ dexp(1)
+    ), data=d |> select(S=surv, N=density, tank),
+    chains=4, log_lik=TRUE, cores=4
+) 
+
+# And sure enough its a_bar is more than Gaussian but less than cauchy
+# And sigma has decreased from Gaussian but less than Cauchy
+precis(m13.2)
+precis(m13m3)
+precis(m13m4)
+
+# And visually can see that Cauchy still has much higher values for the outliers
+models <- list("Gaussian"=m13.2, "Cauchy"=m13m3, "Student"=m13m4)
+map_dfr(models, function(mod) {
+    foo <- precis(mod, depth=2)
+    as_tibble(foo) |>
+        mutate(var = rownames(foo)) |>
+        filter(grepl("^a\\[[0-9]+\\]$", var)) |>
+        select(var, mean)
+}, .id="model") |>
+    pivot_wider(names_from=model, values_from=mean) |>
+    ggplot(aes(x=Student, y=Cauchy)) +
+        geom_point() +
+        geom_abline(intercept=0, slope=1, colour="steelblue")
+
+# But still allows for higher intercepts than the Gaussian
+map_dfr(models, function(mod) {
+    foo <- precis(mod, depth=2)
+    as_tibble(foo) |>
+        mutate(var = rownames(foo)) |>
+        filter(grepl("^a\\[[0-9]+\\]$", var)) |>
+        select(var, mean)
+}, .id="model") |>
+    pivot_wider(names_from=model, values_from=mean) |>
+    ggplot(aes(x=Gaussian, y=Student)) +
+        geom_point() +
+        geom_abline(intercept=0, slope=1, colour="steelblue")
+
+# 13M5
+# compare the effect of adding in a hyper-parameter for y_bar
+# Is this non-identifiable?
+d <- as_tibble(chimpanzees)
+d$treatment <- 1 + d$prosoc_left + 2*d$condition
+m13m5 <- ulam(
+    alist(
+        pulled_left ~ dbinom(1, p),
+        logit(p) <- a[actor] + g[block_id] + b[treatment],
+        b[treatment] ~ dnorm(0, 0.5),
+        a[actor] ~ dnorm(a_bar, sigma_a),
+        g[block_id] ~ dnorm(g_bar, sigma_g),
+        # Hyper-parameters
+        a_bar ~ dnorm(0, 1.5),
+        g_bar ~ dnorm(0, 1.5),
+        sigma_a ~ dexp(1),
+        sigma_g ~ dexp(1)
+    ), data=d |> 
+        mutate(block_id=block, treatment=as.integer(treatment)) |>
+        select(pulled_left, actor, block_id, treatment),
+    chains=4, cores=4, log_lik=TRUE
+)
+# Got more divergences than had initially!
+divergent(m13.4)
+divergent(m13m5)
+
+# What the effect of adding ybar explicitly?
+# It's added far more variability to both a and g intercepts!
+# Sigma a has stayed the same but a_bar has got more variability
+# So that there is more uncertainty around each individual a intercept now
+# sigma g has also stayed the same, but there is a far amount of uncertainty around
+# g_bar itself, leading to more uncertainty around g intercepts
+# In short, when have 2 multi-level intercepts, don't assign a mean to the second!
+plot(coeftab(m13.4, m13m5))
+
+# 13M6
+m13m6_nn <- ulam(
+    alist(
+        y ~ dnorm(mu, 1),
+        mu ~ dnorm(10, 1)
+    ), data=list(y=0), chains=4, cores=4
+)
+m13m6_nt <- ulam(
+    alist(
+        y ~ dnorm(mu, 1),
+        mu ~ dstudent(2, 10, 1)
+    ), data=list(y=0), chains=4, cores=4
+)
+m13m6_tn <- ulam(
+    alist(
+        y ~ dstudent(2, mu, 1),
+        mu ~ dnorm(10, 1)
+    ), data=list(y=0), chains=4, cores=4
+)
+m13m6_tt <- ulam(
+    alist(
+        y ~ dstudent(2, mu, 1),
+        mu ~ dstudent(2, 10, 1)
+    ), data=list(y=0), chains=4, cores=4
+)
+
+# So what's the difference between these?
+# Wow that's a striking pattern!
+# So remember, first letter is the distribution of y (where the only datapoint is 0)
+# Second letter is the prior distribution on mu, which is centered at 10
+# NN: mu is centered at 5 as this is the halfway between the prior (at 10), and the data
+# (at 0). Mu couldn't really be any closer to 0 as it's prior is N(10, 1) and there's only 1 datapoint
+# NT: Putting the prior for mu as a t-distribution now allows for mu to be further from 10, so it can
+# be centered on 0 exactly to fit the data
+# TN: This is the opposite of NT: The t-dist on y allows for mu to be further from 0, and since
+# mu has a gaussian prior centered on 10, it's probably more likely to have mu closer to 10 and use
+# the t-dist on y to get x at 0, then to have mu further from 10 and use less of the t-dists tails for y
+# TT: This is interesting... I guess we end up in a bimodal posterior where either mu is centered on 0
+# and y uses the student's thick tails, or mu is in the thick tails at 0 and y is then centered on mu
+models <- list("NN"=m13m6_nn, "NT"=m13m6_nt, "TN"=m13m6_tn, "TT"=m13m6_tt)
+map_dfr(models, function(mod) {
+    post <- extract.samples(mod)
+    tibble(mu=post$mu[, 1])
+}, .id="model") |>
+    ggplot(aes(x=mu, fill=model)) +
+        geom_density(alpha=0.3) +
+        scale_fill_discrete("") +
+        theme_minimal() +
+        theme(legend.position = "bottom")
+
+# 12H1
+data("bangladesh")
+bangladesh <- as_tibble(bangladesh)
+# 6 columns
+#   - woman: integer id
+#   - district: grouping id, 60 unique values
+#   - use.contraception: binary predictor
+#   - urban: binary predictor
+#   - living.children: numeric, how many children the woman has
+#   - age.centered: numeric, age centered (but not standardised)
+# Will initially be looking at district and use.contraception
+bangladesh
+
+# But district is non-contiguous
+max(bangladesh$district)
+length(unique(bangladesh$district))
+
+# So make it so!
+bangladesh$district_id <- as.integer(as.factor(bangladesh$district))
+
+# Want to predict contraceptive usage by district
+# Fit both fixed effects and random effects versions
+# Prior isn't so important as have a lot of data
+m13h1_fixed <- ulam(
+    alist(
+        contraception ~ dbinom(1, p),
+        logit(p) <- a[district_id],
+        a[district_id] ~ dnorm(0, 1)
+    ), data=bangladesh |> select(contraception=use.contraception, district_id),
+    cores=4, chains=4, log_lik = TRUE
+)
+m13h1_random <- ulam(
+    alist(
+        contraception ~ dbinom(1, p),
+        logit(p) <- a[district_id],
+        a[district_id] ~ dnorm(a_bar, sigma_a),
+        a_bar ~ dnorm(0, 1),
+        sigma_a ~ dexp(1)
+    ), data=bangladesh |> select(contraception=use.contraception, district_id),
+    cores=4, chains=4, log_lik = TRUE
+)
+
+# Plot predictions from both against the real rates
+# Predictions are just the intercepts with inv_logit
+mods <- list("fixed"=m13h1_fixed, "random"=m13h1_random)
+res <- map_dfr(mods, function(mod) {
+    post <- extract.samples(mod)
+    as_tibble(post$a) |>
+        mutate(sim = row_number()) |>
+        pivot_longer(-sim, names_pattern = "V([0-9]+)", names_to="district", values_to="proportion") |>
+        mutate(proportion = inv_logit(proportion))
+}, .id="model")
+# Add PIs and means
+res_summary <- res |>
+    group_by(model, district) |>
+    summarise(
+        mean_prop = mean(proportion),
+        pi_lower = PI(proportion)[1],
+        pi_upper = PI(proportion)[2]
+  ) |>
+    ungroup() |>
+    mutate(district = as.integer(district))
+# Here's the plot
+
+# Want to order by agreement
+district_order <- res_summary |>
+    select(district, model, mean_prop) |>
+    pivot_wider(names_from=model, values_from=mean_prop) |>
+    mutate(diff= abs(fixed - random)) |>
+    arrange(diff) |>
+    pull(district)
+res_summary |>
+    mutate(district = factor(district, levels=district_order)) |>
+    ggplot(aes(x=district)) +
+        geom_hline(aes(yintercept=y),
+                   data=tibble(y=inv_logit(mean(extract.samples(m13h1_random)$a_bar)))) +
+        geom_point(aes(y=mean_prop, colour=model), position=position_dodge(width=0.1)) +
+        geom_errorbar(aes(ymin=pi_lower, ymax=pi_upper, colour=model), position=position_dodge(width=0.1)) +
+        geom_point(aes(y=prop),
+                   data=bangladesh |> 
+                       group_by(district=district_id) |> 
+                       summarise(prop=mean(use.contraception)) |>
+                       mutate(district = factor(district, levels=district_order)),
+                   colour="orange") +
+        ggtitle("Ordered by difference between the 2 models") +
+        theme_classic() +
+        theme(legend.position = "bottom")
+ 
+# How do models disagree and can I explain it?
+# Can I explain the most extreme cases of disagreement?
+# They do tend to disagree more the further the proportion is from the overall average across all
+# districts (black)
+# I.e. the biggest difference at the max x-axis value is when the observed proportion is near 100%,
+# the fixed effect model is around 60% (possibly because I put too tight a prior on)
+# but the random effect is stuck around 0.4
+
+# The other factor that could influence how they differ is in sample size.
+# Would expect random effects could help groups with few points, either by shrinking
+# the estimate towards the overall mean, or by reducing the uncertainty
+district_order_size <- bangladesh |>
+                        count(district_id) |>
+                        arrange(n) |>
+                        pull(district_id)
+res_summary |>
+    mutate(district = factor(district, levels=district_order_size)) |>
+    ggplot(aes(x=district)) +
+        geom_hline(aes(yintercept=y),
+                   data=tibble(y=inv_logit(mean(extract.samples(m13h1_random)$a_bar)))) +
+        geom_point(aes(y=mean_prop, colour=model), position=position_dodge(width=0.1)) +
+        geom_errorbar(aes(ymin=pi_lower, ymax=pi_upper, colour=model), position=position_dodge(width=0.1)) +
+        geom_point(aes(y=prop),
+                   data=bangladesh |> 
+                       group_by(district=district_id) |> 
+                       summarise(prop=mean(use.contraception)) |>
+                       mutate(district = factor(district, levels=district_order_size)),
+                   colour="orange") +
+        ggtitle("Ordered by group size (low to high)") +
+        theme_classic() +
+        theme(legend.position = "bottom")
+
+# Actually that's quite hard to see!
+# Let's directly plot both disagreement against sample size
+# and disagreement against absolute proportion
+res_summary_2 <- res_summary |>
+    select(district, model, mean_prop) |>
+    pivot_wider(names_from=model, values_from=mean_prop) |>
+    mutate(diff= abs(fixed - random)) |>
+    inner_join(bangladesh |> count(district_id), by=c("district"="district_id")) |>
+    rename(size=n) |>
+    inner_join(bangladesh |> group_by(district_id) |> summarise(raw_prop = mean(use.contraception)), by=c("district"="district_id"))
+
+# So here I've plotted the difference between the 2 models as a function of both the sample size
+# and the raw proportion
+# The first facet neatly shows the pooling effect, the further the district is away from the
+# overall average, the greater the difference (more shrinkage)
+# I was expecting to see a stronger relationship with group size, as we saw in the frog dataset
+# It's not helped that the smallest district (3 women reporting) has the highest raw proportion of 1
+# so it immediately has most shrinkage likely due to this high proportion, rather than necessarily due
+# to it having the smallest sample size
+res_summary_2 |>
+    select(district, diff, size, raw_prop) |>
+    pivot_longer(c(size, raw_prop)) |>
+    ggplot(aes(x=value, y=diff)) +
+        geom_point() +
+        facet_wrap(~name, scales="free_x")
+
+# 13H2
+# Varying intercepts model for the Trolley data, grouped by id
+# Include action, intention, contact
+# Compare with model without ID in at all using WAIC and posterior predictions
+# What is the impact of individual variation?
+m13h2_noid <- ulam(
+    alist(
+        R ~ dordlogit(phi, cutpoints),
+        phi <- a + bA*A + bC*C + BI*I,  # I personally find the fully explicit model clearer than separating it like this
+        BI <- bI + bIA*A + bIC*C,
+        a ~ dnorm(0, 1),
+        c(bA, bI, bC, bIA, bIC) ~ dnorm(0, 0.5),
+        cutpoints ~ dnorm(0, 1.5)
+    ),
+    data=Trolley |> select(R=response, A=action, I=intention, C=contact), 
+    chains=4,
+    cores=4,
+    log_lik=TRUE
+)
+
+# NB: Using non-centered parameterisation as got low neff without it
+m13h2_hierarchical <- ulam(
+    alist(
+        R ~ dordlogit(phi, cutpoints),
+        phi <- a_bar + sigma_a * a_z[id] + bA*A + bC*C + BI*I,  # I personally find the fully explicit model clearer than separating it like this
+        a_z[id] ~ dnorm(0, 1),
+        BI <- bI + bIA*A + bIC*C,
+        c(bA, bI, bC, bIA, bIC) ~ dnorm(0, 0.5),
+        a_bar ~ dnorm(0, 1),
+        sigma_a ~ dexp(1),
+        cutpoints ~ dnorm(0, 1.5),
+        gq> vector[id]:a <<- a_bar + a_z*sigma_a
+    ),
+    data=Trolley |> mutate(id = as.integer(id)) |> select(id, R=response, A=action, I=intention, C=contact), 
+    chains=4, cores=4, log_lik = TRUE
+)
+
+# Adding in varying intercept for user id results in a massive predictive change
+# suggesting that there is a significant amount of between-user variance in terms
+# of their baseline moral views
+compare(m13h2_noid, m13h2_hierarchical, func = PSIS)
+
+# There are 331 unique individuals in this dataset
+# The model has a_bar = 0.8, but sigma_a is relatively high at ~=1.9, suggesting a large
+# amount of inter-individual variance
+# NB: There are relatively few neff for sigma, although rhat is ~okay at 1.02...
+# In my first attempt with a centered parameterisation a_bar had Rhat of 1.6 and
+# < 100 n_eff
+precis(m13h2_hierarchical, pars=c("a_bar", "sigma_a"))
+
+# Let's run some counter factual analysis by holding all inputs constant except
+# the individual, we'll use the baseline model with no action, intent, or contact
+# Get get the distribution across individuals holding everything else constant
+# For both models
+preds_hier <- link(m13h2_hierarchical, 
+     data = tibble(
+         A=0, C=0, I=0, id=unique(as.integer(Trolley$id))
+     )
+)
+preds_default <- link(m13h2_noid,
+     data = tibble(
+         A=0, C=0, I=0
+     )
+)
+
+preds_hier_summary <- tibble(
+    id=1:331, 
+    mu = colMeans(preds_hier$phi),
+    lower=apply(preds_hier$phi, 2, PI)[1, ],
+    upper=apply(preds_hier$phi, 2, PI)[2, ]
+)
+
+# Order
+id_ord <- preds_hier_summary |>
+    arrange(mu) |>
+    pull(id)
+preds_hier_summary$id <- factor(preds_hier_summary$id, levels=id_ord)
+pooled_mean <- colMeans(preds_default$phi)
+pooled_lower <- apply(preds_default$phi, 2, PI)[1, ]
+pooled_upper <- apply(preds_default$phi, 2, PI)[2, ]
+
+# Plot!
+# Huge amount of inter-person variance
+# 64% of people have an average mu > 0, i.e. more morally permissible, while 36% are < 0
+# Looks relatively normally distrubted, although some largish tails on the positive end
+preds_hier_summary |>
+    ggplot(aes(x=id)) +
+        geom_point(aes(y=mu)) +
+        geom_errorbar(aes(ymin=lower, ymax=upper)) +
+        theme_classic()
+
+preds_hier_summary |>
+    summarise(mean(mu > 0))
+
+# 13H3
+m13h3 <- ulam(
+    alist(
+        R ~ dordlogit(phi, cutpoints),
+        phi <- a_bar + sigma_a * a[id] + b[story] + bA*A + bC*C + BI*I,  # I personally find the fully explicit model clearer than separating it like this
+        b[story] ~ dnorm(0, sigma_b),
+        BI <- bI + bIA*A + bIC*C,
+        c(bA, bI, bC, bIA, bIC) ~ dnorm(0, 0.5),
+        a_z ~ dnorm(0, 1),
+        a_bar ~ dnorm(0, 1),
+        sigma_a ~ dexp(1),
+        sigma_b ~ dexp(1),
+        gq> vector[actor]:a <<- a_bar + a_z*sigma_a,
+        cutpoints ~ dnorm(0, 1.5)
+    ),
+    data=Trolley |> mutate(id = as.integer(id),
+                           story=as.integer(story)) |> select(id, story, R=response, A=action, I=intention, C=contact), 
+    chains=4, cores=4, log_lik = TRUE
+)
+
+compare(m13h2_noid, m13h2_hierarchical, m13h3, func = PSIS)
+
+# TODO make posterior plots like did for previous question
+
+# 13H4
+# Isn't this asking the same thing as 13M1?
+
+# Ask Richard -------------------------------------------------------------
+
+# Should we use transformed parameters or generated quantities for non-centering?
+# Book says GQ, Manual says TP
+
+
