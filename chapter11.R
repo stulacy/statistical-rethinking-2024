@@ -456,6 +456,12 @@ adjustmentSets(dag_dept, exposure="G", outcome="A", effect = "direct")
 # But remember that 'total' causal effect is different!
 # Here I would fit a model of both D ~ G, and A ~ G + D and then hold G constant
 # and see the counterfactual on A
+# NB: I think I've really misunderstand total causal effect here, stemming from
+# Chapter 5 where it looked at the 'total COUNTERFACTUAL effect', which did this, fit
+# a joint model of both Confounder ~ Exposure, and Outcome ~ Exposure + Confounder
+# And simulate Confounder using Exposure and then Outcome from both.
+# I mistook this to mean that this is how you calculate the TOTAL CAUSAL EFFECT
+# when in fact all you have to do is fit the model as described by adjustmentSets
 adjustmentSets(dag_dept, exposure="G", outcome="A", effect = "total")
 adjustmentSets(dag_dept, exposure="G", outcome="A", effect = "direct")
 
@@ -1397,17 +1403,11 @@ dag <- dagitty("dag {
   awards <- gender -> discipline -> awards;
 }")
 drawdag(dag)
-# For total effects would need both models, a ~ g1 + d, d ~ g2
-# And would simulate first G -> D, then G -> A and D -> A (I've never done this manually,
-# only through sim with the 'vars' argument)
-# For direct effect just want G -> A, but need to condition on D because of the backdoor
-# path, so just model A ~ G + D and look at the coefficient of G
-# So I imagine the indirect effect is G -> D -> A, so just do the same as the total causal
-# effect, but just omit simulating G -> A.
-# What does that mean in practice? Fit the model A ~ G + D, but only simulate the D
-# coefficient? That coefficient only makes sense in the context of having G in the model
-# Maybe I'll just take the difference between the Total and Direct causal effects
-adjustmentSets(dag, exposure="", outcome="awards", effect="direct")
+# Can estimate direct effects as A ~ G + D,
+# Total effects as A ~ G
+# Then indirect effect is the difference
+adjustmentSets(dag, exposure="gender", outcome="awards", effect="direct")
+adjustmentSets(dag, exposure="gender", outcome="awards", effect="total")
 
 NWOGrants <- NWOGrants |>
     mutate(
@@ -1415,7 +1415,7 @@ NWOGrants <- NWOGrants |>
         did = as.numeric(discipline)
     )
 
-m11h4_a <- quap(
+m11h4_direct <- quap(
     alist(
         awards ~ dbinom(applications, p),
         logit(p) <- a[did] + b[gid],
@@ -1425,198 +1425,37 @@ m11h4_a <- quap(
     data=NWOGrants
 )
 # Quite high variance between disciplines
-plot(precis(m11h4_a, depth=2))
+plot(precis(m11h4_direct, depth=2))
 # Let's look at gender contrasts
-post <- extract.samples(m11h4_a)
-# Slightly higher acceptance rate for men, although 3% probability difference
+post_direct <- extract.samples(m11h4_direct)
+# Slightly higher acceptance rate for men, although 2.5% probability difference
 # in absolute terms is minute
-plot(precis(tibble(m_minus_f=inv_logit(post$b[, 1]) - inv_logit(post$b[, 2]))))
+gender_diff_direct <- inv_logit(post_direct$b[, 1]) - inv_logit(post_direct$b[, 2])
+plot(precis(tibble(direct=gender_diff_direct)))
 # That's the direct effect anyway!
 
 # For indirect we need the total as well as the direct, so need to model
-# D ~ G.
-# My first idea was to model the probability of each gender applying to
-# each discipline as a multinomial, but multinomials are awkward
-# with aggregated data, as on each row the discipline isn't a DEPENDENT var,
-# but rather an INDEPENDENT, as we have all permutations of gender & disciplines.
-# The raw counts of disciplines are thus evenly split, giving even modelled probs.
-# Could potentially use applications as a predictor to weight each row,
-# but then it gets weird when it comes time to simulate from this model
-# as we won't know the number of applications in advanced, 
-# because the whole point is the number of applications is a CONSEQUENCE 
-# of gender & discipline, not a PREDICTOR.
-# Instead could expand the data long so that each row is a an application
-# with the outcome being success, and the predictors being discipline & gender
-# Can then model each outcome as a categorical and each awarded as a bernoulli.
-# Only problem is this will take far longer to sample!
-# I'll give it a go
+# A ~ G.
+m11h4_total <- quap(
+    alist(
+        awards ~ dbinom(applications, p),
+        logit(p) <- b[gid],
+        b[gid] ~ dnorm(0, 1.5)
+    ),
+    data=NWOGrants
+)
+post_total <- extract.samples(m11h4_total)
+# So will calculate the gender contrast for each model separately, then take
+# the difference to get the indirect effect
+gender_diff_total <- inv_logit(post_total$b[, 1]) - inv_logit(post_total$b[, 2])
+# Total difference is ~3% too... that seems wrong?!
+plot(precis(tibble(total=gender_diff_total)))
 
-# Prep data into long (1 row per application)
-NWO_long <- pmap_dfr(NWOGrants, function(discipline, gender, applications, awards, gid, did) {
-    df <- tibble(
-        gid=rep(gid, applications),
-        did=rep(did, applications),
-        awarded=0
-    ) 
-    df$awarded[1:awards] <- 1
-    df
-})
-# Looks good!
-NWO_long |>
-    group_by(gid, did) |>
-    summarise(awarded=sum(awarded)) |>
-    arrange(did)
-
-# So now can model each row as being a choice from a categorical for discipline
-# based on sex
-# And can model whether was awarded or not as a bernouili, rather than binomial
-code_m11h4 <- "
-data {
-    int N;  // Number of observations
-    int K;  // Number of possible disciplines
-    int J;  // Number of genders
-    array[N] int discipline;  // outcome1
-    array[N] int awarded;  // outcome2
-    array[N] int gender;  // predictor
-}
-
-parameters {
-    matrix[K, J] a1;   // Intercepts in model 1 (D ~ G)
-    vector[K] a2;      // Intercepts in model 2 (A ~ G + D)
-    vector[J] g2;      // Intercepts in model 2 (A ~ G + D)
-}
-
-model {
-    // Model 1
-    matrix[N, K] s;  // Linear predictor pre link
-    for (i in 1:N) {
-        for (k in 1:K) {
-            s[i, k] = a1[k, gender[i]];
-        }
-    }
-    
-    // Model 2
-    vector[N] p2;
-    p2 = a2[discipline] + g2[gender];
-    
-    // Model 1
-    to_vector(a1) ~ normal(0, 1);
-    for (i in 1:N) {
-        discipline[i] ~ categorical(softmax(to_vector(s[i, ])));
-    }
-    
-    // Model 2
-    awarded ~ bernoulli_logit(p2);
-    a2 ~ normal(0, 1);
-    g2 ~ normal(0, 1);
-}
-"
-dat_list <- list(N=nrow(NWO_long), K=9, J=2, gender=NWO_long$gid,
-                 discipline=NWO_long$did,
-                 awarded=NWO_long$awarded)
-# And fit!
-m11h4 <- stan(model_code=code_m11h4, data=dat_list, chains=4, cores=4)
-# rhat <= 1.02, n_eff is a bit low, but remember we only ran for 1k samples
-# ideally would bump up a bit
-precis(m11h4, depth=3)
-
-# So how do the coefficients for the discipline model compare to the quap model?
-# Pretty well!
-precis(m11h4, depth=2, pars=c("a2", "g2"))
-precis(m11h4_a, depth=2)
-
-# Do the applications per dept by gender seem reasonable?
-post <- extract.samples(m11h4)
-# We have 2,000 samples from 9 disciplines and 2 genders
-dim(post$a1)
-# Need to softmax these for each sample and gender
-ps <- apply(post$a1, c(1, 3), softmax)
-# Here is 1 sample with the 9 disciplines on rows and 2 genders in cols
-ps[, 1,]
-# And the columns sum to 1 as expected
-colSums(ps[, 1, ])
-
-# So now can take mean and PIs
-mu_mean <- apply(ps, c(1, 3), mean)
-mu_pi <- apply(ps, c(1, 3), PI)
-# Can also sample from categorical
-# 2000 x 2
-# Then how to draw PI from categorical?
-sim <- apply(ps, c(2, 3), function(x) {
-    rcategorical(1, x)
-})
-
-NWO_modelled <- as_tibble(mu_mean) |>
-    rename(m=V1, f=V2) |>
-    mutate(did=row_number()) |>
-    pivot_longer(-did, names_to="gender", values_to="p_mean") |>
-    inner_join(
-        tibble(
-            gender='m',
-            p_lower=mu_pi[1, , 1],
-            p_upper=mu_pi[2, , 1],
-            did=1:9
-        ) |>
-            rbind(
-                tibble(
-                    gender='f',
-                    p_lower=mu_pi[1, , 2],
-                    p_upper=mu_pi[2, , 2],
-                    did=1:9
-                ) 
-            ),
-        by=c("gender", "did")
-    ) 
-# The model has (unsurprisingly since it's just an intercept) found the proportions
-# applying to each discipline by gender, and there are indeed some differences
-# between genders, i.e. very few women apply to physics vs men, or indeed physical sciences
-# while women are more represented in the social sciences
-NWO_modelled |>
-    inner_join(NWOGrants, by=c("gender", "did")) |>
-    group_by(gender) |>
-    mutate(prop_applied = applications / sum(applications)) |>
-    ungroup() |>
-    rename(modelled=p_mean, actual=prop_applied) |>
-    pivot_longer(c(modelled, actual)) |>
-    ggplot(aes(x=discipline, y=value, colour=name)) +
-        geom_point(position=position_dodge(width=1)) +
-        geom_errorbar(aes(ymin=p_lower, ymax=p_upper)) +
-        facet_wrap(~gender) +
-        theme_bw() +
-        theme(axis.text.x = element_text(angle=45, hjust=1))
-
-# The question asked for the total indirect effect of gender on awarded
-# This can be determined as the total effect - total direct effect
-
-# Total causal effect:
-# Simulate N men and women, simulate their discipline, then plug these 2 values
-# into the model for awarded
-total_causal <- map_dfr(1:2000, function(i) {
-    map_dfr(1:2, function(g) {
-        # simulate discipline
-        disc_ps <- ps[, i, g]
-        disc <- rcategorical(1, disc_ps)
-        # simulate award
-        p_award <- inv_logit(post$a2[i, disc] + post$g2[i, g])
-        awarded <- rbern(1, p_award)
-        tibble(sim=i, gid=g, did=disc, awarded=awarded)
-    })
-})
-
-# So now, what's the prob of being awarded split by gender?
-# 18.8% Male, 15.6% Female
-# TODO: How to get PI for a categorical outcome?
-# If this was a Gaussian could use quantiles, but here's that's meaningless
-total_causal |>
-    group_by(gid) |>
-    summarise(prop_awarded = mean(awarded))
-
-# And what's the direct effect?
-# 24% for men and 21% for women, how is that larger than the total effect?!
-precis(tibble(male=inv_logit(post$g2[, 1]),
-       female=inv_logit(post$g2[, 2])))
-
-# I think I've misunderstood something here, need to see the solution (TODO)
+# Indirect effect is thus the difference
+# And is ~ 0.5%. So most of the way in which gender affects awards being granted
+# is directly, rather than through the choice of discipline
+# However, this difference is low in absolute terms at 2.5%
+plot(precis(tibble(indirect=gender_diff_total - gender_diff_direct)))
 
 # M11H5
 dag2 <- dagitty("dag { 
