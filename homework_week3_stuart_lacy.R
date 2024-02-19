@@ -88,6 +88,33 @@ tibble(F=sim_dat$F, W=colMeans(s$W)) |>
 sd(d$avgfood)
 0.033 * sd(d$weight)
 
+
+# Marking -----------------------------------------------------------------
+# Another example of where I've mistakenly calculated the counterfactual
+# when all I needed to do was fit a single model for the total causal effect
+# So for total causal effect of F on W, don't need to adjust for anything
+adjustmentSets(dag_1, exposure="F", outcome="W", effect="total")
+m2_corrected <- quap(
+    alist(
+        W ~ dnorm(mu, sigma),
+        mu <- a + bF*F,
+        a ~ dnorm(0, 0.2),
+        bF ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ),
+    data=d
+)
+# A very small effect, although slightly higher in magnitude than the 0.033 I got
+# from the counter-factual approach: -0.02. Due to getting a full posterior
+# rather than my ad-hoc estimation, we can see the CIs cover 0.
+# Despite this, my original approach still gave the same message: increasing
+# food either has no effect on wolves weight, or a slightly negative one
+# The wording of the question "simulate an intervention on food" is partly
+# what made me think of approaching this in my original manner, but this
+# could also refer to simply running an intervention on this bivariate
+# W ~ F
+precis(m2_corrected)
+
 # Question 3 --------------------------------------------------------------
 # Total causal effect of F on W
 # Need to adjust for G as have a masked relationship
@@ -152,3 +179,14 @@ m4 <- quap(
 
 # Now simulate just providing U
 # (Should I have simulated the entiredataset so that )
+
+# Marking -----------------------------------------------------------------
+# I was correct in that the direct effect could still be estimated by
+# conditioning on G
+adjustmentSets(dag_2, exposure = "F", outcome = "W", effect="direct")
+# But I was wrong about the total effect due to my ongoing misunderstanding
+# regarding total causal effect and counterfactual modelling
+# But for future reference, if adjustmentSets doesn't print the empty
+# set ({}), then it means this cannot be done, like in this scenario where
+# adding U introduces a backdoor path
+adjustmentSets(dag_2, exposure = "F", outcome = "W", effect="total")

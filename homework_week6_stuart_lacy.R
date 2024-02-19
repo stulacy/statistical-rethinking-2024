@@ -8,7 +8,7 @@ library(ggridges)
 predictive_prior <- function(mu, sigma, rate, N=100) {
     a_bar <- rnorm(N, mu, sigma)
     sigma_a <- rexp(N, rate)
-    a_int <- rnorm(a_bar, sigma_a)
+    a_int <- rnorm(N, a_bar, sigma_a)
     tibble(sim=1:N, prob=inv_logit(a_int))
 }
 
@@ -35,6 +35,13 @@ bind_rows(models, .id="prior") |>
         scale_fill_discrete("") +
         theme(legend.position = "bottom")
 
+
+# Marking -----------------------------------------------------------------
+# I had a bug in my code (forgot to add the N parameter to rnorm...) so my initial
+# interpretations were off.
+# Basically increasing the variance of the individal level slopes, either through
+# decreasing the Exp rate on sigma, or increasing the SD of a_bar, turns the distribution
+# into a bi-modal with masses either at 0 or 1. Saw this earlier with logit models
 
 # Question 2 --------------------------------------------------------------
 # Standard varying intercepts model
@@ -144,6 +151,70 @@ coordinates(dag2) <- list(x=c(Predation=0, Survival=2, Tank=1),
 drawdag(dag2)
 
 
+# Marking -----------------------------------------------------------------
+# I completely missed that this dataset is from an experiment
+# so there shouldn't be any confounding - all the non-outcome
+# variables are experimental controls!
+# I.e. the dag should be
+dag3 <- dagitty("dag {
+  Tank;
+  Predation;
+  Survival;
+  Tank -> Survival;
+  Predation -> Survival;
+  Size -> Survival;
+}")
+drawdag(dag3)
+
+# I also scanned the question too quickly and thought it
+# was a clone of one of the chapter's problems where you had to
+# add size & predation sequentially into the base model to see their
+# effect. Instead, the phrase "An easy approach is to estimate an
+# effect for each combination of pred and size" implies to fit an
+# INTERACTION model, so have 1 intercept per combination
+# of predation and size. This can be achieved easily using a matrix
+# of intercepts. NB: this is equivalent to multiplying 2 continuous
+# variables together
+# We can do this with the current dag despite it not being necessary
+# because of backdoor paths, to improve precision in our answer
+# and also to tease out any effects that moderate each other.
+# NB: DAGS CONTAIN NO INFORMATION ABOUT HOW VARIABLES INTERACT OR NOT
+# TO PRODUCE OUTCOMES
+# Which seems a little counter-intuitive, but I guess the rationale is
+# that if both predation and size effect survival, then it doesn't matter
+# if this happens independently or with an interaction
+
+# Anyway, the interaction model:
+# NB: removed a_bar as now have 2 intercepts
+m2_marked <- ulam(
+    alist(
+        S ~ dbinom(N, p),
+        logit(p) <- a[tank] + b[pid, sid],
+        a[tank] ~ dnorm(0, sigma),
+        matrix[pid, sid]:b ~ dnorm(0, 1),
+        a_bar ~ dnorm(0, 1.5),
+        sigma ~ dexp(1)
+    ), data=d |> select(S=surv, N=density, tank, pid, sid),
+    chains=4, log_lik=TRUE, cores=4
+)
+# Decent rhat and n_eff
+precis(m2_marked, depth=3)
+# The matrix parameters are interesting!
+# In order they are: 
+# No pred / big
+# Pred / big
+# No pred / small
+# Pred / small
+# So there is a non-linear effect here!
+# Firstly predators being present has the biggest effect on survival by far
+# as noticed in my models
+# When there are no predators, being big does have a slight advantage
+# BUT when there ARE predators around, being big is actually a DISADVANTAGE
+# Perhaps most easy to spot?
+
+# This would have been completely missed by my interaction model as it
+# was linear!
+
 # Question 3 --------------------------------------------------------------
 data(Trolley)
 m13h2_noid <- ulam(
@@ -235,3 +306,13 @@ preds_hier_summary |>
 preds_hier_summary |>
     summarise(mean(mu > 0))
 
+
+# Marking -----------------------------------------------------------------
+# Main comment here is to look at how the A, C, and I, coefficients changed
+# when the individual intercepts were added! They got even more negative, 
+# meaning the between-individual variation was masking the effect size
+
+# The solution then goes on to use the Story grouping variable as in the 
+# end of chapter Problem set, although I didn't do this because the model was 
+# taking too long to fit, and I'm unable to access the @stanfit slow to save the
+# model after it succesfully fits!

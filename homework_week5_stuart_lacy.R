@@ -70,6 +70,10 @@ precis(direct_effect)
 # Little difference between total and direct effect, slightly reduced from 3% to 2% in favour of men
 # But still showing a male advantage
 dens(direct_effect)
+# 2.5% male DIRECT advantage
+mean(direct_effect)
+# 2.8% male TOTAL advantage
+mean(total_effect)
 
 # HOWEVER! The question now asks for "average direct causal effect of gender,
 # weighting each discipline in proportion to the number of applications in each sample".
@@ -112,7 +116,30 @@ direct_effect_2 <- probs_men - probs_women
 dens(as.numeric(direct_effect_2))
 # Giving us an effect of -0.01 on average, with 89% CI from -0.16 - 0.12, i.e. nothing
 precis(as.numeric(direct_effect_2))
+mean(as.numeric(direct_effect_2))
+median(as.numeric(direct_effect_2))
 
+# Marking -----------------------------------------------------------------
+# NB: What we did here was called POST-STRATIFYING
+# Where reweight counter-factuals according to the distribution
+# of samples in the 'real' world. Think how polls work (fit model of voter
+# preference by certain characteristics from small sample, then simulate 
+# how the entire voting population would vote) using their known characteristics
+
+# The difference between this model (A ~ G * D) and the one in the book (A ~ G + D) is based
+# on how you model the functional relationship between Gender and Discipline. Are they independent (book)
+# or interacting (homework)? They both answer the same question of whether there is a direct relationship, but
+# they differ in their assumptions (does each dept have a different gender imbalance?). Would be interesting to
+# see what would happen if had a partially pooled version of this!
+# The reason for needing to do the post-stratifying, is unlike the book model where you get a single coefficient
+# the direct causal effect estimate, here you get one estimate per discipline and so need to marginalize over
+# discipline. The way this is done is using a WEIGHTED average, which makes sense as we have data that the applications
+# per discipline aren't uniform.
+# Using interactions more explicitly like this also means you can pull out more interesting observations, and provided
+# you have sufficient data, can understand your problem much more in depth. Week 6's homework shows a use-case where
+# an interesting relationship would be hidden if a full interaction wasn't used. This approach also scales well to
+# partial pooling, i.e. could have a male effect across disciplines that each discipline is drawn from and ditto for
+# female, and then can use THESE hyper-parameters as the direct effect estimates (I think... sounds right in my head!)
 
 # Question 3 --------------------------------------------------------------
 data("UFClefties")
@@ -162,3 +189,47 @@ precis(as_tibble(inv_logit(post$a)))
 
 # Based on this, why do I think lefties are overrepresented in the UFC?
 # Potentially just old wives' tales that they are better fighters, without looking at the actual data?
+
+# Marking -----------------------------------------------------------------
+# The solutions says that we "need a model that is invariant to which
+# figher is listed as number 1 or 2", which isn't the case for my model as
+# I explicitly differentiate between fighter 1 being a leftie and fighter 2 not
+# and vice-versa
+# TODO: Why is this required?
+# So the straight forward solution is rather than having a categorical predictor
+# with all 4 matchups, to just encode this as continuous so get a single 
+# coefficient, e.g. matchup = fighter1_lefty - fighter2_lefty
+# So if both are lefties or righties this is 0
+# If F1 is leftie and F2 is rightie then this gives the log-odds of a F1 win,
+# and if F1 is rightie and F2 is leftie then it's the -ve log-odds of a F1 win,
+# i.e. the log-odds of an F2 win. This means the model is exchangeable to fighter
+# labels.
+# I.e. say matchup = F1_leftie - F2_leftie = M
+# Then prob of F1 win is inv_logit(M)
+# and prob of F2 win is inv_logit(-M) = 1 - inv_logit(M)
+# Demonstrate this holds:
+# 80% chance of F1 win if F1 leftie and F2 rightie
+M <- 1.4
+inv_logit(M)
+
+# 20% chance if the opposite
+inv_logit(-M)
+
+inv_logit(-M) == (1 - inv_logit(M))
+# Basically the same except for float precision
+inv_logit(-M) - (1 - inv_logit(M))
+
+m5 <- ulam(
+    alist(
+        winner ~ dbern(p),
+        logit(p) <- b*matchup,
+        b ~ dnorm(0, 1)
+    ), data=UFClefties |> mutate(matchup=fighter1.lefty - fighter2.lefty) |>
+        select(matchup, winner=fighter1.win), cores=4, chains=4
+)
+# Decent rhat and neff
+# Effect is centered on 0!
+# Ok rhat and neff, so looks like no leftie effect!
+# The solutions discusses possible explanations for this common belief
+precis(m5)
+

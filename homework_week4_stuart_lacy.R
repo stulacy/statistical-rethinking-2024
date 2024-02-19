@@ -160,6 +160,30 @@ m2_7 <- quap(
 # F and A on their own is actually the least predictive model.
 compare(m2_1, m2_2, m2_3, m2_4, m2_5, m2_6, m2_7)
 
+# Marking -----------------------------------------------------------------
+# My model rankings are correct, but I didn't really comment on the
+# causal interpretation of the coefs.
+# Since the most predictive model (just!) by WAIC is the model with all
+# 3 of F, G, and A I should try and assign a causal interpretation to each,
+# given the DAG.
+
+# F: since have included G
+# in the model, the bF coefficient
+# just measures the direct F->W path
+# and doesn't take the indirect effect through G
+# into account. Furthermore, since A is included
+# as a cause of the exposure, it will bias our
+# estimate of F->W ("reduces variation" according to answers)
+# G: also the direct effect G->W
+# A: because F is included, the path A->W should be blocked
+# and thus bA shouldn't measure anything. 
+# However, it is non-zero!
+# Given this, there might be unobserved confounding factors
+# that explains why A is associated through W after
+# accounting for F.
+
+
+
 # Question 3 --------------------------------------------------------------
 data("Dinosaurs")
 d <- Dinosaurs
@@ -312,6 +336,8 @@ m_3_logistic <- ulam(
         sigma ~ dexp(1)
     ), data=d |> filter(sp_id == 3) |> select(M, A), chains=4, cores=4, log_lik=TRUE
 )
+# Look at those massive rhats and low neff!
+precis(m_3_logistic)
 
 post <- link(m_3_logistic, data=ndata |> filter(sp_id == 3))
 mu <- colMeans(post)
@@ -346,3 +372,150 @@ foo |>
         geom_line()
 # Going to give up now as have run out of time!
 # Will try and pick this up later
+
+# Marking -----------------------------------------------------------------
+# Never got round to following up on my attempt at a logistic growth curve so
+# will copy the model from the solutions here.
+
+# Richard provides 2 such models, the first is:
+# Mass(age) = k(1-exp(-b*Age))
+# Which is a 'Von Bertanlanffy growth model', with 
+# dy/dt = b(k-y), where k is the maximum growth size and b is the rate,
+# y is current value (height, mass, whatever)
+# Would like to have the time to see how this differs from the logistic
+# growth model I attempted with
+m4b <- ulam(
+    alist(
+        M ~ normal(mu, sigma),
+        mu <- k*(1-exp(-b*A)),
+        b ~ exponential(1),
+        k ~ normal(1, 0.5),
+        sigma ~ exponential(1)
+    ), 
+    data=d |> filter(sp_id == 1) |> select(A, M),
+    chains=4, cores=4, log_lik = TRUE
+)
+# Decent rhat and n_eff
+precis(m4b)
+
+# Check out posterior predictions...
+post <- link(m4b, data=ndata |> filter(sp_id == 1))
+mu <- colMeans(post)
+mu_PI <- apply(post, 2, PI)
+
+# Not good at all! Misses 2 points from PI and the
+# initial ramp doesn't look at all plausible
+ndata |>
+    filter(sp_id == 1) |>
+    mutate(mu=mu,
+           mu_lower = mu_PI[1, ],
+           mu_upper = mu_PI[2, ]
+           ) |>
+    inner_join(d |> select(sp_id, species), by="sp_id", relationship="many-to-many") |>
+    ggplot(aes(x=A, y=mu, colour=species, fill=species)) +
+        #geom_ribbon(aes(ymin=sim_lower, ymax=sim_upper), alpha=0.3) +   # Had to remove as the simulated PIs don't look sensible, it looks like they're in the wrong order
+        geom_ribbon(aes(ymin=mu_lower, ymax=mu_upper), alpha=0.5) +
+        geom_line() +
+        geom_hline(yintercept=0, linetype="dashed") +
+        geom_point(aes(y=M),data=d |> filter(sp_id == 1)) +
+        facet_wrap(~species) +
+        guides(colour="none", fill="none") +
+        theme_bw()
+
+# Richard solves this by adding a second parameter
+# to the model to allow it to accelerate (I thought
+# my logistic growth model would have this second parameter)
+
+# The new model is 
+# Mass(age) = k(1-exp(-b*Age))^a
+# Where a > 1
+m4c <- ulam(
+    alist(
+        M ~ normal(mu, sigma),
+        mu <- k*(1-exp(-b*A))^a,
+        a ~ exponential(0.1),
+        b ~ exponential(1),
+        k ~ normal(1, 0.5),
+        sigma ~ exponential(1)
+    ), 
+    data=d |> filter(sp_id == 1) |> select(A, M),
+    chains=4, cores=4, log_lik = TRUE
+)
+
+# Slightly worse rhat and neff now, some divergences
+precis(m4c)
+
+# Check out posterior predictions...
+post <- link(m4c, data=ndata |> filter(sp_id == 1))
+mu <- colMeans(post)
+mu_PI <- apply(post, 2, PI)
+
+# But at least capture that early stage better now!
+ndata |>
+    filter(sp_id == 1) |>
+    mutate(mu=mu,
+           mu_lower = mu_PI[1, ],
+           mu_upper = mu_PI[2, ]
+           ) |>
+    inner_join(d |> select(sp_id, species), by="sp_id", relationship="many-to-many") |>
+    ggplot(aes(x=A, y=mu, colour=species, fill=species)) +
+        #geom_ribbon(aes(ymin=sim_lower, ymax=sim_upper), alpha=0.3) +   # Had to remove as the simulated PIs don't look sensible, it looks like they're in the wrong order
+        geom_ribbon(aes(ymin=mu_lower, ymax=mu_upper), alpha=0.5) +
+        geom_line() +
+        geom_hline(yintercept=0, linetype="dashed") +
+        geom_point(aes(y=M),data=d |> filter(sp_id == 1)) +
+        facet_wrap(~species) +
+        guides(colour="none", fill="none") +
+        theme_bw()
+
+# The double logistic curve is best 
+compare(m4b, m4c, func=PSIS)
+
+# Now fit using all dinosaurs with each dinosaur
+# having their own parameters
+m4d <- ulam(
+    alist(
+        M ~ normal(mu, sigma),
+        mu <- k[S]*(1-exp(-b[S]*A))^a[S],
+        a[S] ~ exponential(0.1),
+        b[S] ~ exponential(1),
+        k[S] ~ normal(1, 0.5),
+        sigma ~ exponential(1)
+    ), 
+    data=d |> select(S=sp_id, A, M),
+    chains=4, cores=4, log_lik = TRUE
+)
+
+# Rhat is better now, even for the species
+# that fitted alone last time. How is that possible?
+# Could understand if using a hierarchical model
+# The only shared parameter is sigma, so maybe that's
+# helped by having more data
+precis(m4d, depth=2)
+
+# Indeed sigma has reduced quite a bit now
+# and has a lot more effective samples
+precis(m4c, pars="sigma")
+precis(m4d, pars="sigma")
+
+# Check out posterior predictions...
+post <- link(m4d, data=ndata |> rename(S=sp_id))
+mu <- colMeans(post)
+mu_PI <- apply(post, 2, PI)
+
+# Those look ok actually!
+ndata |>
+    mutate(mu=mu,
+           mu_lower = mu_PI[1, ],
+           mu_upper = mu_PI[2, ]
+           ) |>
+    inner_join(d |> select(sp_id, species), by="sp_id", relationship="many-to-many") |>
+    ggplot(aes(x=A, y=mu, colour=species, fill=species)) +
+        #geom_ribbon(aes(ymin=sim_lower, ymax=sim_upper), alpha=0.3) +   # Had to remove as the simulated PIs don't look sensible, it looks like they're in the wrong order
+        geom_ribbon(aes(ymin=mu_lower, ymax=mu_upper), alpha=0.5) +
+        geom_line() +
+        geom_hline(yintercept=0, linetype="dashed") +
+        geom_point(aes(y=M),data=d) +
+        facet_wrap(~species) +
+        guides(colour="none", fill="none") +
+        theme_bw()

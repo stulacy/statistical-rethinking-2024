@@ -64,6 +64,24 @@ sim_dat <- data.frame(A = A_seq)
 # Ensure we simulate H first
 s <- sim(m2, data=sim_dat, vars=c("H", "W"))
 
+# Marking -----------------------------------------------------------------
+# I misunderstood the question. Rather than forming a full generative model
+# of the DAG, it was just looking for a simulation that represents these
+# relationships.
+# i.e.
+N <- 100
+age <- runif(N, 1, 12)
+# Coefficients don't matter, the order of execution is the focus here
+height <- rnorm(N, age * 0.7, 3) 
+weight <- rnorm(N, age * 0.3 + height * 0.6, 2)
+# Age vs height
+plot(age, height)
+# Age has direct effect on weight
+plot(age, weight)
+# Height has stronger direct effect on weight
+plot(height, weight)
+
+
 # Question 2 --------------------------------------------------------------
 # Estimate the total causal effect of each year of growth on weight
 # Using the above simulation
@@ -83,6 +101,44 @@ lm(colMeans(s$W) ~ sim_dat$A)
 # NB: this is NOT the same as adding the 2 age coefficients from the model
 precis(m2)
 # 0.07 + 0.91
+
+# Marking -----------------------------------------------------------------
+# I misunderstood the question for the same reason as in Chapter 11's 
+# Problems, that I misunderstood how to estimate a total causal effect,
+# thinking that a full joint model and looking at counterfactuals
+# was the correct way. Whereas in fact a single model of W ~ A is needed
+adjustmentSets(dag_q1, "A", "W", effect="total")
+# I'll use the same priors as I had for my original answer
+# Will be interesting to see if the same result is reached
+m2_corrected <- quap(
+    alist(
+        W ~ dnorm(mu, sigma),
+        mu <- a + bA * A,
+        a ~ dnorm(0, 0.2),
+        bA ~ dnorm(0, 0.5),
+        sigma ~ dexp(1)
+    ), 
+    data=d
+)
+# This gives an effect of 0.89 per SD of age on SD of weight
+# Which is actually what my counter-factual method identified, but
+# obviously doing it directly is far more straight forward.
+# The counter-factual method is more flexible however and allows us to ask,
+# well, counterfactuals.
+precis(m2_corrected)
+
+# Converting it back into original measurement units to compare with the
+# given answer gives 9.22 years is associated with 19.8kg
+# Or 1 year
+age_sd <- 1 * sd(d$age) + mean(d$age)
+weight_change_per_sd <- 0.89 * sd(d$weight) + mean(d$weight)
+age_sd
+weight_change_per_sd
+# Or ~ 2.14kg per year, which is actually higher than the 1.38kg/year
+# that the solutions has, although they didn't use any standardization
+# which I don't think should change the effect size this much
+weight_change_per_sd / age_sd
+# I tried again with a wider prior and it didn't change the age coefficient
 
 # Question 3 --------------------------------------------------------------
 data("Oxboys")
@@ -181,3 +237,52 @@ median(total_growth)
 chainmode(total_growth)
 # Range of 11.3 - 14.4
 range(total_growth)
+
+# Marking -----------------------------------------------------------------
+# I went into way more depth than the question asked.
+# They didn't want specific growth-factors per occasions,
+# or to model each subject with a different intercept
+# It just wanted the 'pooled' average inter-occasion growth
+# i.e.
+m4 <- quap(
+    alist(
+        height_diff ~ dlnorm(mu, sigma),
+        mu <- alpha,
+        alpha ~ dnorm(0, 0.1),
+        sigma ~ dexp(3)
+    ), data=d |> filter(!is.na(height_diff))
+)
+# So the average height growth is 0.29 in log-normal
+precis(m4)
+
+# Looking at the exponent of this to get back to the measurement scale
+dens(sim(m4))
+# the median is 1.33cm per occasion
+median(sim(m4))
+# The mean is 1.62, which matches up with my models 1 and 2 (which were indirectly asking each occasions contribution to
+# total height)
+mean(sim(m4))
+
+# Can simulate the total growth over 8 occasions
+# By simulating 8 sums
+post <- extract.samples(m4)
+total <- sapply(1:nrow(post), function(i) {
+    sum(rlnorm(8, post$alpha[i], post$sigma[i]))
+})
+dens(total)
+
+# Median growth of 12.6
+median(total)
+# Mean growth of 13cm, which is the same as my 
+# model that allowed each occasion to have a differing rate
+mean(total)
+
+# NB: My models had the same median and mean as my growth factor
+# despite also having the log-normal prior to enforce positivity
+# How come I got a Gaussian posterior but the solutions model
+# has log-normal? I believe because quap assumes every posterior
+# is Gaussian, including that of my growth rate (with log-normal)
+# prior. HOWEVER, the solutions model has the growth-rate as an
+# OUTCOME, so it strictly doesn't have a posterior, just a
+# POSTERIOR PREDICTIVE which we run outside of quap and so is
+# log-normal
