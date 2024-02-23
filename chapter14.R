@@ -962,3 +962,5 @@ tibble(
 # Or even a double-level prior, so that get treatment effects have their own dist per actor
 # and actors have their own dist
 
+# Why is D a competing cause in Week 7 HW Q2 and can be included?
+
