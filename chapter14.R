@@ -88,7 +88,7 @@ m14.1 <- ulam(
         sigma ~ exponential(1),
         Rho ~ lkj_corr(2)
     ),
-    data=d, chains=4, cores=4
+    data=d, chains=4, cores=4, log_lik=TRUE
 )
 
 # sigma_cafe is vector of 2, Rho is a 'corr_matrix' of 2 dims
@@ -611,7 +611,7 @@ m14.8 <- ulam(
         c(a,b,g) ~ dexp(1),
         etasq ~ dexp(2),
         rhosq ~ dexp(0.5)
-    ), data=dat_list, chains=4, cores=4, iter=2000
+    ), data=dat_list, chains=4, cores=4, iter=2000, log_lik=TRUE
 )
 # Good rhat and neff
 precis(m14.8, depth=3)
@@ -744,7 +744,7 @@ m14.8nc <- ulam(
         c(a,b,g) ~ dexp(1),
         etasq ~ dexp(2),
         rhosq ~ dexp(0.5)
-    ), data=dat_list, chains=4, cores=4, iter=2000
+    ), data=dat_list, chains=4, cores=4, iter=2000, log_lik=TRUE
 )
 precis(m14.8, depth=2)
 # Much better n_eff! have other 2,000!
@@ -757,7 +757,7 @@ data("Primates301_nex")
 plot(ladderize(Primates301_nex), type="fan", font=1, no.margin=TRUE, 
      label.offset=1, cex=0.5)
 # Primates has 16 variables from 301 primate species
-Primates30 |> dim()
+Primates301_nex |> dim()
 # the nex version is a phylogenetic tree
 Primates301_nex
 # Class 'phylo'
@@ -790,6 +790,7 @@ dstan |>
         theme_classic()
 
 # NB: Won't let me calculate log_lik!
+# NO CORRELATION between species
 m14.9 <- ulam(
     alist(
         B ~ multi_normal(mu, SIGMA),
@@ -953,6 +954,929 @@ tibble(
         labs(y="covariance", x="Phylogenetic distance") +
         geom_smooth()
 
+
+# Problems ----------------------------------------------------------------
+
+# 14E1: Make following changes:
+# ui = a[group[i]] + b[group[i]]*x_i
+# b[group] ~ Normal(beta_mean, beta_sigma)
+# But would probably set beta mean = 0 to make more identifiable
+
+# 14E2: Varying intercepts correlated with varying slopes: 
+# Football modelling of goals: intercept is average goals per team, slope is home
+# advantage. A team that scores more on average in general, is likely to benefit more
+# from a home advantage
+
+# 14E3: Varying slopes model having fewer effective parameters than fixed-effects model:
+# If the slopes don't vary much between groups, then the variance will be low and can mostly
+# be descriped by the regularizing prior, than the individual level slopes
+
+# 14M1
+a <- 3.5       # average morning wait time (intercept)
+b <- -1        # average difference with afternoon wait time (slope)
+sigma_a <- 1   # std dev of intercepts
+sigma_b <- 0.5 # std dev of slopes
+rho <- 0.0    # correlation between intercepts and slopes
+
+# form multivariate Gaussian parameterisation
+Mu <- c(a, b)
+cov_ab <- sigma_a * sigma_b*rho
+# Encode Sigma as correlation matrix & variance matrix
+sigmas <- c(sigma_a, sigma_b)
+Rho <- matrix(c(1, rho, rho, 1), nrow=2)
+diag(sigmas)  # Converts the 2-length vector into 2x2 matrix with 0s on off-diagonals
+Sigma <- diag(sigmas) %*% Rho %*% diag(sigmas)
+
+# MASS provides multivariate normal
+# Draw 20 cafes from this multivariate normal
+N_cafes <- 20
+set.seed(5)
+vary_effects <- mvrnorm(N_cafes, Mu, Sigma)
+a_cafe <- vary_effects[, 1]
+b_cafe <- vary_effects[, 2]
+
+# Visit each of these 20 cafes 10 times, 5x morning & 5x afternoon
+set.seed(22)
+N_visits <- 10
+afternoon <- rep(0:1, N_visits*N_cafes/2)
+cafe_id <- rep(1:N_cafes, each=N_visits)
+mu <- a_cafe[cafe_id] + b_cafe[cafe_id] * afternoon
+sigma <- 0.5  # stdev within cafes
+wait <- rnorm(N_visits*N_cafes, mu, sigma)
+d <- tibble(cafe=cafe_id, afternoon, wait)
+
+# Fit varying slopes model
+set.seed(867530)
+m14m1 <- ulam(
+    alist(
+        wait ~ normal(mu, sigma),
+        mu <- a_cafe[cafe] + b_cafe[cafe] * afternoon,
+        c(a_cafe, b_cafe)[cafe] ~ multi_normal(c(a, b), Rho, sigma_cafe),
+        a ~ normal(5, 2),
+        b ~ normal(-1, 0.5),
+        sigma_cafe ~ exponential(1),
+        sigma ~ exponential(1),
+        Rho ~ lkj_corr(2)
+    ),
+    data=d, chains=4, cores=4
+)
+
+# The posterior correlations are far closer to the prior around 0 (orange), vs the negatively correlated
+# model (blue)
+post_cor <- extract.samples(m14.1)
+post_ind <- extract.samples(m14m1)
+dens(post_cor$Rho[, 1, 2], xlim=c(-1, 1), col="steelblue")
+dens(post_ind$Rho[, 1, 2], xlim=c(-1, 1), add=TRUE, col="orange")
+dens(rlkjcorr(1e4, K=2, eta=2)[, 1, 2], add=TRUE, lty=2, col="black")
+
+# 14M2
+# Fitting independent Gaussian priors rather than multivariate for the intercept & slope
+# Also use wide priors on a and b
+set.seed(867530)
+m14m2 <- ulam(
+    alist(
+        wait ~ normal(mu, sigma),
+        mu <- a_cafe[cafe] + b_cafe[cafe] * afternoon,
+        a_cafe[cafe] ~ normal(a, sigma_a),
+        b_cafe[cafe] ~ normal(b, sigma_b),
+        a ~ normal(0, 10),
+        b ~ normal(0, 10),
+        sigma ~ exponential(1),
+        sigma_a ~ exponential(1),
+        sigma_b ~ exponential(1)
+    ),
+    data=d, chains=4, cores=4, log_lik = TRUE
+)
+# There is very little predictive difference!
+# The independent model has fewer effective parameters, which could be because it is
+# a simpler model, i.e. not having to model the correlations as well as the sigmas
+# I don't know how you would explain this?
+# I guess because there is enough flexibility for each model to learn their own parameters
+# Whereas if you had a lot of cafes, and some cafes only had a few visits, then the multi-variate
+# model would help more as it would provide more information on the relationship between the slope & intercept
+compare(m14.1, m14m2)
+
+# 14M3
+# varying-slopes model for UCBadmit with non-centered paramterisation
+# There is no varying slopes model for UCBadmit...
+# This model was last used in Chapter 12 where we used a beta-binomial model
+# to account for overdispersion when not including the dept in the model
+# Here was the model with dept in
+data(UCBadmit)
+d <- UCBadmit
+dat_list <- list(
+    admit=d$admit,
+    applications=d$applications,
+    gid=ifelse(d$applicant.gender=='male', 2, 1),
+    dept_id=rep(1:6, each=2)
+)
+
+m11.8 <- ulam(
+    alist(
+        admit ~ dbinom(applications, p),
+        logit(p) <- a[gid] + delta[dept_id],
+        a[gid] ~ dnorm(0, 1.5),
+        delta[dept_id] ~ dnorm(0, 1.5)
+    ), 
+    data=dat_list, chains=4, iter=4000  # Bumped up to 4,000 samples!
+)
+precis(m11.8, depth=2)
+
+# So to make this multi-variate we want to have gender and dept correlated
+# But these are categorical so can't just have a 2D multivariate
+# In the book and lecture examples we've had the same length categorical
+# for slopes and intercepts, i.e. have 13 departments with intercepts & slopes
+# so have a MVN of (13, 2). 
+# But here we have unbalanced data, i.2. 2 genders and 6 depts
+# One solution is to use an _indicator_ variable rather than _index_ for gender
+# This allows us to get a dept-level intercept (for the baseline gender), and then a 
+# slope for each dept for its effect of changing gender
+
+# So the centered version would look like this
+dat_list$gid <- as.integer(dat_list$gid - 1)
+# And sure enough gives divergence warnings (only 4 though)
+m14m3_centered <- ulam(
+    alist(
+        admit ~ dbinom(applications, p),
+        logit(p) <- a[dept_id] + male[dept_id]*gid,
+        c(a, male)[dept_id] ~ multi_normal(c(a_bar, male_bar), Rho, sigma),
+        a_bar ~ dnorm(0, 1.5),
+        male_bar ~ dnorm(0, 1),
+        sigma ~ exponential(1),
+        Rho ~ lkj_corr(2)
+    ), 
+    data=dat_list, chains=4
+)
+
+# However, we could also think of this as basically having a separate male and female
+# effect per dept, so we can directly model that as a single varying intercept (but indexed
+# in 2 dimensions), vs a intercept + slope
+dat_list$gid <- as.integer(dat_list$gid + 1)
+# No divergence issues now!
+m14m3_centered_matrix <- ulam(
+    alist(
+        admit ~ dbinom(applications, p),
+        logit(p) <- alpha[dept_id, gid],
+        # So rather than provide 2 columns to the multi-normal, will provide
+        # a 2D vector 
+        # Also note not providing means here, just assuming centered on zero
+        vector[2]:alpha[dept_id] ~ multi_normal(c(female_bar, male_bar), Rho, sigma),
+        
+        # Then the hyper-priors:
+        sigma ~ exponential(1),
+        female_bar ~ normal(0, 1),
+        male_bar ~ normal(0, 1),
+        Rho ~ lkj_corr(2)
+    ), 
+    data=dat_list, chains=4
+)
+# We actually got decent neff with the original model, all around 1.5k
+precis(m14m3_centered, depth=3)
+
+# And we actually get mostly better results now, many variables have n_eff > 2.5k 
+precis(m14m3_centered_matrix, depth=3)
+
+# The correlations should have different interpretations now
+# In the first one with slopes & intercepts, the correlation is that
+# in a dept with low female acceptance, since male is higher, then will have a bigger ADDITIONAL
+# acceptance rate if male, whereas if have high female acceptance rate than the ADDITIONAl acceptance
+# rate of males will be less
+# Whereas the second is saying that male and female admission rates are correlated in general
+precis(m14m3_centered, pars="Rho", depth=3)
+precis(m14m3_centered_matrix, pars="Rho", depth=3)
+
+# Lots of boring code to extract posterior samples into tibbles...
+post_cent <- extract.samples(m14m3_centered)
+post_cent_matrix <- extract.samples(m14m3_centered_matrix)
+df_separate_female <- as_tibble(
+    post_cent$a
+)
+df_separate_male <- as_tibble(
+    post_cent$a + post_cent$male
+)
+colnames(df_separate_female) <- paste0('D', 1:6)
+df_separate_female <- df_separate_female |>
+    mutate(sample = 1:2000) |>
+    pivot_longer(-sample, names_pattern="D([0-6])", names_to="dept", values_to="logit_odds")
+colnames(df_separate_male) <- paste0('D', 1:6)
+df_separate_male <- df_separate_male |>
+    mutate(sample = 1:2000) |>
+    pivot_longer(-sample, names_pattern="D([0-6])", names_to="dept", values_to="logit_odds")
+df_separate <- rbind(
+    df_separate_female |> mutate(gender='F'),
+    df_separate_male |> mutate(gender='M')
+)
+
+df_matrix_male <- as_tibble(post_cent_matrix$alpha[, , 2])
+df_matrix_female <- as_tibble(post_cent_matrix$alpha[, , 1])
+colnames(df_matrix_male) <- paste0('D', 1:6)
+df_matrix_male <- df_matrix_male |>
+    mutate(sample = 1:2000) |>
+    pivot_longer(-sample, names_pattern="D([0-6])", names_to="dept", values_to="logit_odds")
+colnames(df_matrix_female) <- paste0('D', 1:6)
+df_matrix_female <- df_matrix_female |>
+    mutate(sample = 1:2000) |>
+    pivot_longer(-sample, names_pattern="D([0-6])", names_to="dept", values_to="logit_odds")
+df_matrix <- rbind(
+    df_matrix_female |> mutate(gender='F'),
+    df_matrix_male |> mutate(gender='M')
+)
+df_comb <- rbind(
+    df_separate |> mutate(model="separate"),
+    df_matrix |> mutate(model="matrix")
+)
+
+# And plot!
+# So in effect it doesn't really matter whether you model it as a multivariate intercept
+# or intercept + slope for each dept. As Richard's pointed out before, the former means
+# you can use consistent priors, rather than the 'slope' group having in effect
+# 2 priors on them
+df_comb |>
+    mutate(probs = inv_logit(logit_odds)) |>
+    ggplot(aes(x=dept, y=probs)) +
+        geom_boxplot(aes(colour=model)) +
+        geom_point(data=d |>
+                       mutate(
+                           dept=as.integer(as.factor(dept)),
+                           gender = ifelse(applicant.gender == 'female', 'F', 'M')
+                       ) |>
+                       group_by(dept, gender) |>
+                       summarise(probs=admit / applications) |>
+                        ungroup(),
+                   colour="purple", size=3
+        ) +
+        facet_wrap(~gender) +
+        theme_classic() +
+        theme(legend.position = "bottom")
+        
+
+# So the non-centered version is a lot more involved!
+# I can't easily add on the group level parameters in ulam, although this should
+# be easy in raw Stan (see comment in model).
+# NB: this is a benefit of the separate intercept & slope model, you'd non-center it with:
+# logit(p) <- a_bar + a[dept_id] + (male_bar + male[dept_id])*gid
+# And then use multi_normal(0, ...)
+m14m3_noncentered <- ulam(
+    alist(
+        # Likelihood and linear predictor remains the same
+        admit ~ dbinom(applications, p),
+        # Slightly awkward way of adding the group level parameters!
+        # If I were in pure stan I'd make a matrix in transpar where first column
+        # is alpha[, 1] + gender_bar[1] and ditto for second. But with the ulam
+        # syntax I can't see a way of declaring a matrix and then updating it in
+        # 2 subsequent lines
+        logit(p) <- (gid-1) * male[dept_id] + (1 - (gid-1)) * female[dept_id],
+        
+        # adaptive priors (aka hyperparameter priors) - non-centered
+        # NB: Took me ages to get this compiling! Have to put the alpha transpar
+        # AFTER the female & male
+        transpars> vector[6]:female <<- gender_bar[1] + alpha[,1],
+        transpars> vector[6]:male <<- gender_bar[2] + alpha[,2],
+        transpars> matrix[6, 2]:alpha <-
+            compose_noncentered(sigma, L_Rho, z),
+        
+        # Fixed priors
+        matrix[2, 6]:z ~ normal(0, 1),
+        vector[2]:sigma ~ dexp(1),
+        vector[2]:gender_bar ~ normal(0, 1),
+        cholesky_factor_corr[2]:L_Rho ~ lkj_corr_cholesky(2),
+        
+         # generated quantities: ordinary correlation matrices
+        gq> matrix[2, 2]:Rho <<- Chol_to_Corr(L_Rho)
+    ),data=dat_list,
+    cores=4, chains=4, log_lik=TRUE
+)
+precis(m14m3_noncentered, depth=3)
+
+# And we get the same gender means as the non-centered version
+precis(m14m3_centered_matrix, pars=c("female_bar", "male_bar"))
+precis(m14m3_noncentered, pars=c("gender_bar"), depth=2)
+
+# Extract the full distribution to compare graphically
+post_cent_noncentered <- extract.samples(m14m3_noncentered)
+df_noncentered_male <- as_tibble(post_cent_noncentered$male)
+df_noncentered_female <- as_tibble(post_cent_noncentered$female)
+colnames(df_noncentered_male) <- paste0('D', 1:6)
+df_noncentered_male <- df_noncentered_male |>
+    mutate(sample = 1:2000) |>
+    pivot_longer(-sample, names_pattern="D([0-6])", names_to="dept", values_to="logit_odds")
+colnames(df_noncentered_female) <- paste0('D', 1:6)
+df_noncentered_female <- df_noncentered_female |>
+    mutate(sample = 1:2000) |>
+    pivot_longer(-sample, names_pattern="D([0-6])", names_to="dept", values_to="logit_odds")
+df_noncentered <- rbind(
+    df_noncentered_female |> mutate(gender='F'),
+    df_noncentered_male |> mutate(gender='M')
+)
+df_comb <- rbind(
+    df_separate |> mutate(model="separate"),
+    df_matrix |> mutate(model="matrix"),
+    df_noncentered |> mutate(model="noncentered")
+)
+# Yep the non-centered and centered matrix versions are the same
+df_comb |>
+    mutate(probs = inv_logit(logit_odds)) |>
+    ggplot(aes(x=dept, y=probs)) +
+        geom_boxplot(aes(colour=model)) +
+        geom_point(data=d |>
+                       mutate(
+                           dept=as.integer(as.factor(dept)),
+                           gender = ifelse(applicant.gender == 'female', 'F', 'M')
+                       ) |>
+                       group_by(dept, gender) |>
+                       summarise(probs=admit / applications) |>
+                        ungroup(),
+                   colour="purple", size=3
+        ) +
+        facet_wrap(~gender) +
+        theme_classic() +
+        theme(legend.position = "bottom")
+
+# And finally compare on n_effs?!
+# Ah, interesting, the centered version actually does better!
+# I imagine it hugely depends on how many groups you have, and so should only reach for it
+# ONCE have tried it with centered and gotten divergences / low n_eff
+centered_separate_raw <- precis(m14m3_centered, pars=c('a', 'male'), depth=2)
+centered_separate <- as_tibble(centered_separate_raw) |>
+    mutate(gender=rep(c('female', 'male'), each=6), dept = rep(1:6, 2))
+centered_matrix_raw <- precis(m14m3_centered_matrix, pars="alpha", depth=3)
+centered_matrix <- as_tibble(centered_matrix_raw) |>
+    mutate(gender=rep(c('female', 'male'), each=6), dept = rep(1:6, 2))
+noncentered_raw <- precis(m14m3_noncentered, pars=c("male", "female"), depth=2)
+noncentered <- as_tibble(noncentered_raw) |>
+    mutate(gender=rep(c('male', 'female'), each=6), dept = rep(1:6, 2))
+rbind(
+    centered_separate |> mutate("model"="centered - separate"),
+    centered_matrix |> mutate("model"="centered - matrix"),
+    noncentered |> mutate("model"="non-centered")
+) |>
+    ggplot(aes(x=dept, y=ess_bulk, colour=model)) +
+        geom_point() +
+        facet_wrap(~gender) +
+        theme_bw() +
+        scale_colour_brewer(palette="Dark2") +
+        theme(
+            legend.position = "bottom"
+        )
+
+# 16M4
+# Refit the 'scientific' model with no GP
+data(Kline)
+d <- Kline
+d$P <- scale(log(d$population))
+d$contact_id <- ifelse(d$contact == 'high', 2, 1)
+dat2 <- list(T=d$total_tools, P=d$population, cid=d$contact_id)
+m11.11 <- ulam(
+    alist(
+        T ~ dpois(lambda),
+        lambda <- exp(a[cid]) * P^b[cid]/g,
+        a[cid] ~ dnorm(1, 1),
+        b[cid] ~ dexp(1),
+        g ~ dexp(1)
+    ), data=dat2, chains=4, log_lik=TRUE
+)
+# The two versions with the GP prior are much better (although again dWAIC is low)
+# Interestingly they have fewer effective parameters despite actually having more 
+# parameters! This is because they've accounted for over-dispersion by having
+# a random effect per island. Presumably there isn't much variation between islands
+# so there is some shrinkage there
+compare(m14.8, m14.8nc, m11.11)
+
+# 14M5
+# Use GROUP SIZE as outcome and BRAIN as predictor
+dat_list <- dstan |> dplyr::select(B, G, M, Imat) |> as.list()
+dat_list$N_spp <- nrow(dstan)
+dat_list$Dmat <- Dmat[dstan$name, dstan$name] / max(Dmat)
+dat_list$V <- V[dstan$name, dstan$name]
+dat_list$R <- cov2cor(dat_list$V)
+m14m5 <- ulam(
+    alist(
+        G ~ multi_normal(mu, SIGMA),
+        mu <- a + bM*M + bB*B,
+        matrix[N_spp, N_spp]: SIGMA <- cov_GPL1(Dmat, etasq, rhosq, 0.01),
+        a ~ normal(0, 1),
+        c(bM,bB) ~ normal(0, 0.5),
+        etasq ~ half_normal(1, 0.25),
+        rhosq ~ half_normal(3, 0.25)
+    ), data=dat_list, chains=4, cores=4
+)
+# So just to recap, the original model showed that Brain size is weakly associated
+# with Group size, after accounting for body mass and the fact that close (phylogeneticaly
+# speaking) species have certain things in common anyway
+precis(m14.11)
+# In this new model, there is little evidence for the reverse (i.e. brain size doesn't
+# influence group) after adjusting for phlyogeny
+precis(m14m5)
+
+# Fitting the model with no phylogeny shows a strong effect, so a lot of the variation in
+# group size seems to be accounted for by phylogeny
+m14m5_nophylo <- ulam(
+    alist(
+        G ~ multi_normal(mu, SIGMA),
+        mu <- a + bM*M + bB*B,
+        matrix[N_spp, N_spp]: SIGMA <- Imat * sigma_sq,
+        a ~ normal(0, 1),
+        c(bM,bB) ~ normal(0, 0.5),
+        sigma_sq ~ exponential(1)
+    ), data=dat_list, chains=4, cores=4
+)
+precis(m14m5_nophylo)
+
+# 14H1
+data("bangladesh")
+bangladesh <- as_tibble(bangladesh)
+# But district is non-contiguous
+# So make it so!
+bangladesh$district_id <- as.integer(as.factor(bangladesh$district))
+
+# Want to predict contraceptive usage by district
+# But now adding varying slope on urban, also by district
+# Will try centered first
+# Not least because when I add the non-centered version I'm not sure how
+# to get partial pooling
+# I.e. if have zero mean rather than a hierarchical prior, are we still getting
+# partial pooling?
+m14h1 <- ulam(
+    alist(
+        contraception ~ dbinom(1, p),
+        logit(p) <- a[district_id, 1] + a[district_id, 2]*urban,
+        vector[2]:a[district_id] ~ multi_normal(c(a_bar, u_bar), Rho, sigma),
+        
+        # Hyper-parameters
+        a_bar ~ dnorm(0, 1),
+        u_bar ~ dnorm(0, 1),
+        sigma ~ exponential(1),
+        Rho ~ lkj_corr(2)
+    ), data=bangladesh |> dplyr::select(contraception=use.contraception, district_id, urban),
+    cores=4, chains=4, log_lik = TRUE
+)
+
+# Correlation between slopes and intercepts is negative, and quite strongly
+# So if a district has high contraception use for rural (intercept), then would expect
+# that urban has low
+# Also don't have that bad n_eff and Rhat is ok, so no need to reach for non-centered
+precis(m14h1, depth=3)
+
+# That doesn't feel right so will make the suggested diagnostic plots
+# Plot mean varying effect estimates for slope & intercept by district
+# Ah yes that is quite negatively correlated!
+# So districts with high rural use of contraception, don't see much change in urban because
+# urban districts tend to have higher use rates in general
+# Meanwhile rural districts with low contraception use (top left point for example) have
+# much bigger slopes because the urban areas have higher use in general
+post <- extract.samples(m14h1)
+intercepts_df <- as_tibble(post$a[, , 1])
+slopes_df <- as_tibble(post$a[, , 2])
+colnames(intercepts_df) <- paste0('D', 1:60)
+intercepts_df <- intercepts_df |>
+    mutate(sample=1:2000) |>
+    pivot_longer(-sample, names_pattern="D([0-9]+)", names_to='district')
+colnames(slopes_df) <- paste0('D', 1:60)
+slopes_df <- slopes_df |>
+    mutate(sample=1:2000) |>
+    pivot_longer(-sample, names_pattern="D([0-9]+)", names_to='district')
+comb_df <- rbind(
+    slopes_df |> mutate(var='slope'),
+    intercepts_df |> mutate(var='intercepts')
+) |>
+    group_by(district, var) |>
+    summarise(value=mean(value, na.rm=T)) |>
+    ungroup() |>
+    pivot_wider(names_from=var, values_from=value) 
+comb_df |>
+    ggplot(aes(x=intercepts, y=slope)) +
+        geom_point() +
+        theme_classic() +
+        labs(x="Intercept (rural)", y="Slope (additional logit odds from being urban)")
+
+# NB: if fitted a version using the matrix intercept method, so the same number
+# of parameters but now it's just 1 intercept per row, I'd expect to see a positive
+# correlation but maybe a little weak, since this analysis suggests that all urban
+# areas seem to have similarly high levels of contraception use
+# Let's test this!
+
+m14h1_intercepts <- ulam(
+    alist(
+        contraception ~ dbinom(1, p),
+        logit(p) <- a[district_id, urban],
+        vector[2]:a[district_id] ~ multi_normal(c(rural_bar, u_bar), Rho, sigma),
+        
+        # Hyper-parameters
+        rural_bar ~ dnorm(0, 1),
+        u_bar ~ dnorm(0, 1),
+        sigma ~ exponential(1),
+        Rho ~ lkj_corr(2)
+    ), data=bangladesh |> mutate(urban = as.integer(urban + 1)) |> dplyr::select(contraception=use.contraception, district_id, urban),
+    cores=4, chains=4, log_lik = TRUE
+)
+
+# Doesn't look like any obvious difference in n_eff or Rhat - both are fine
+precis(m14h1_intercepts, depth=3)
+precis(m14h1, depth=3)
+
+# NB: now Rho has a very different interpretation as it's the correlation between contraception
+# use in rural & urban areas, rather than the correlation between intercept & slope
+precis(m14h1, pars="Rho", depth=3)
+precis(m14h1_intercepts, pars="Rho", depth=3)
+
+# compare on WAIC
+# Because they are effectively the same model they have almost the same WAIC, with a slight preference
+# for the intercepts model
+compare(m14h1, m14h1_intercepts)
+
+# Visualize correlation between the 2 intercepts
+# Now there's much less correlation!
+post <- extract.samples(m14h1_intercepts)
+intercepts_df <- as_tibble(post$a[, , 1])
+slopes_df <- as_tibble(post$a[, , 2])
+colnames(intercepts_df) <- paste0('D', 1:60)
+intercepts_df <- intercepts_df |>
+    mutate(sample=1:2000) |>
+    pivot_longer(-sample, names_pattern="D([0-9]+)", names_to='district')
+colnames(slopes_df) <- paste0('D', 1:60)
+slopes_df <- slopes_df |>
+    mutate(sample=1:2000) |>
+    pivot_longer(-sample, names_pattern="D([0-9]+)", names_to='district')
+comb_df <- rbind(
+    slopes_df |> mutate(var='slope'),
+    intercepts_df |> mutate(var='intercepts')
+) |>
+    group_by(district, var) |>
+    summarise(value=mean(value, na.rm=T)) |>
+    ungroup() |>
+    pivot_wider(names_from=var, values_from=value) 
+comb_df |>
+    ggplot(aes(x=intercepts, y=slope)) +
+        geom_point() +
+        theme_classic() +
+        labs(x="Intercept (rural)", y="Intercept (urban)")
+
+# Also plot predicted proportion of urban & rural women using contraception
+# Urban sites generally have higher contraceptive usage rates
+ndata <- expand_grid(urban=c(1, 2), district_id=unique(bangladesh$district_id))
+mu <- link(m14h1_intercepts, data=ndata)
+ndata |>
+    mutate(
+        pred_mean = colMeans(mu),
+        pred_lower = apply(mu, 2, PI)[1, ],
+        pred_upper = apply(mu, 2, PI)[2, ]
+    ) |>
+    mutate(urban = factor(urban, levels=c(1, 2), labels=c("Rural", "Urban"))) |>
+    ggplot(aes(x=urban, y=pred_mean, colour=urban)) +
+        geom_point(position=position_dodge(width=0.1)) +
+        geom_errorbar(aes(ymin=pred_lower, ymax=pred_upper)) +
+        facet_wrap(~district_id, scales="free_x") +
+        scale_colour_brewer(palette="Dark2") +
+        theme_classic() +
+        theme(
+            legend.position = "bottom"
+        )
+
+# 14M2: 
+# Use the dag from lecture 13, although will remove the U->K link that the lecture had
+dag <- dagitty("dag { 
+    C <- A -> K;
+    K -> C;
+}")
+coordinates(dag) <- list(
+    x=c(C=2, A=0, K=1),
+    y=c(C=1, A=1, K=0)
+)
+drawdag(dag)
+
+# To evaluate the DAG will want to estimate the total causal influence of A on C, as well
+# as the direct effect.
+# NB: Why can we retain district and urban in the model if they don't appear in the DAG?
+# Unneeded, but how does it affect the results?
+# Once I've fitted the model for the answers, then try and remove them and see what happens
+           
+# So firstly estimate the total causal effects of A on C
+# No need to adjust for K
+adjustmentSets(dag, exposure="A", outcome="C", effect = "total")
+bangladesh <- bangladesh |>
+    mutate(age = as.numeric(scale(age.centered)), kids=as.numeric(scale(living.children))) 
+m14h2_total <- ulam(
+    alist(
+        contraception ~ dbinom(1, p),
+        logit(p) <- a[district_id, urban] + bA*age,
+        vector[2]:a[district_id] ~ multi_normal(c(rural_bar, u_bar), Rho, sigma),
+        
+        # Priors
+        bA ~ dnorm(0, 1),
+        
+        # Hyper-parameter priors
+        rural_bar ~ dnorm(0, 1),
+        u_bar ~ dnorm(0, 1),
+        sigma ~ exponential(1),
+        Rho ~ lkj_corr(2)
+    ), data=bangladesh |> mutate(urban = as.integer(urban + 1)) |> dplyr::select(contraception=use.contraception, district_id, urban, age),
+    cores=4, chains=4, log_lik = TRUE
+)
+
+# And for direct need kids too
+m14h2_direct <- ulam(
+    alist(
+        contraception ~ dbinom(1, p),
+        logit(p) <- a[district_id, urban] + bA*age + bK * kids,
+        vector[2]:a[district_id] ~ multi_normal(c(rural_bar, u_bar), Rho, sigma),
+        
+        # Priors
+        bA ~ dnorm(0, 1),
+        bK ~ dnorm(0, 1),
+        
+        # Hyper-parameter priors
+        rural_bar ~ dnorm(0, 1),
+        u_bar ~ dnorm(0, 1),
+        sigma ~ exponential(1),
+        Rho ~ lkj_corr(2)
+    ), data=bangladesh |> mutate(urban = as.integer(urban + 1)) |> dplyr::select(contraception=use.contraception, district_id, urban, age, kids),
+    cores=4, chains=4, log_lik = TRUE
+)
+# The total effect is weakly positive, suggesting that age has a positive association
+# with contraception usage
+precis(m14h2_total, pars="bA")
+# But after controlling for number of kids already have, the relationship is moderately weak
+# suggesting that age has a positive effect on number of kids, which has a weakly positive effect
+# on contraception usage
+precis(m14h2_direct, pars="bA")
+# There's actually a relatively strong effect of # of kids on contraception use
+precis(m14h2_direct, pars="bK")
+
+# To see the nature of the relationship between age and kids we'd have to fit a new model
+m14h2_kids <- ulam(
+    alist(
+        children ~ dpois(lambda),
+        log(lambda) <- a[district_id, urban] + bA*age,
+        vector[2]:a[district_id] ~ multi_normal(c(rural_bar, u_bar), Rho, sigma),
+        
+        # Priors
+        bA ~ dnorm(0, 1),
+        
+        # Hyper-parameter priors
+        rural_bar ~ dnorm(0, 1),
+        u_bar ~ dnorm(0, 1),
+        sigma ~ exponential(1),
+        Rho ~ lkj_corr(2)
+    ), data=bangladesh |> mutate(urban = as.integer(urban + 1)) |> dplyr::select(contraception=use.contraception, district_id, urban, age, children=living.children),
+    cores=4, chains=4, log_lik = TRUE
+)
+# This does have an effect, but check out all those divergences and E-BFMI!
+precis(m14h2_kids, pars="bA")
+precis(m14h2_kids, depth=3)
+
+# Does making it non-centered help?
+m14h2_kids_noncent <- ulam(
+    alist(
+        children ~ dpois(lambda),
+        log(lambda) <- (urban) * dist_urban[district_id] + (1 - urban) * dist_rural[district_id] + bA * age,
+        
+        # Non-centering
+        transpars> vector[60]:dist_rural <<- urban_bar[1] + alpha[,1],
+        transpars> vector[60]:dist_urban <<- urban_bar[2] + alpha[,2],
+        transpars> matrix[60, 2]:alpha <-
+            compose_noncentered(sigma, L_Rho, z),
+        
+        # Fixed priors
+        matrix[2, 60]:z ~ normal(0, 1),
+        vector[2]:sigma ~ dexp(1),
+        vector[2]:urban_bar ~ normal(0, 1),
+        cholesky_factor_corr[2]:L_Rho ~ lkj_corr_cholesky(2),
+        bA ~ dnorm(0, 1),
+        
+        # generated quantities: ordinary correlation matrices
+        gq> matrix[2, 2]:Rho <<- Chol_to_Corr(L_Rho)
+        
+    ), data=bangladesh |> dplyr::select(contraception=use.contraception, district_id, urban, age, children=living.children),
+    cores=4, chains=4, log_lik = TRUE
+)
+# No warnings!
+precis(m14h2_kids_noncent, depth=3)
+
+# And reassuringly the same effect of age, a moderately positive one
+precis(m14h2_kids, pars="bA")
+precis(m14h2_kids_noncent, pars="bA")
+
+# 14H3
+# Refit any model from 14H2 with children as monotonic ordered category
+dat_bang <- bangladesh |> 
+                mutate(urban = as.integer(urban + 1)) |> 
+                dplyr::select(contraception=use.contraception, district_id, urban, age, children=living.children) |>
+                as.list()
+dat_bang$alpha <- rep(2, 3)
+m14h3_direct <- ulam(
+    alist(
+        contraception ~ dbinom(1, p),
+        logit(p) <- a[district_id, urban] + bA*age + bK*sum(delta_j[1:children]),
+        vector[2]:a[district_id] ~ multi_normal(c(rural_bar, u_bar), Rho, sigma),
+        
+        # Priors
+        bA ~ dnorm(0, 1),
+        bK ~ dnorm(0, 1),
+        vector[4]: delta_j <<- append_row(0, delta),
+        simplex[3]: delta ~ dirichlet(alpha),
+        
+        # Hyper-parameter priors
+        rural_bar ~ dnorm(0, 1),
+        u_bar ~ dnorm(0, 1),
+        sigma ~ exponential(1),
+        Rho ~ lkj_corr(2)
+    ), data=dat_bang,
+    cores=4, chains=4, log_lik = TRUE
+)
+# The continuous effect is 1 kid increases the logit odds by 0.53, or a factor of 1.7
+precis(m14h2_direct, pars="bK")
+# In the ordinal model the effect is very non-linear.
+# From 1st to second kid the difference is 1.36 * 0.73 = 1, or a factor of 2.7
+# But for subsequent children it's 0.17 * 1.36 = 0.23, or factor of 1.26
+# And for child 3-4 it's 0.1 * 1.36 = 0.136, or factor of 1.15
+# So adding in ordinal gives us much more information than continuous predictor here
+# Useful trick for when do have continuous data but with very low count ranges
+precis(m14h3_direct, pars=c("bK", "delta"), depth=2)
+
+# For the model of kids ~ age, we want the orderedlogit model
+# NB: this likelihood handles the logit transform for us
+m14h3_kids <- ulam(
+    alist(
+        children ~ ordered_logistic(phi, kappa),
+        phi <- (urban) * dist_urban[district_id] + (1 - urban) * dist_rural[district_id] + bA * age,
+        
+        # Non-centering
+        transpars> vector[60]:dist_rural <<- urban_bar[1] + alpha[,1],
+        transpars> vector[60]:dist_urban <<- urban_bar[2] + alpha[,2],
+        transpars> matrix[60, 2]:alpha <-
+            compose_noncentered(sigma, L_Rho, z),
+        
+        # Fixed priors
+        matrix[2, 60]:z ~ normal(0, 1),
+        vector[2]:sigma ~ dexp(1),
+        vector[2]:urban_bar ~ normal(0, 1),
+        cholesky_factor_corr[2]:L_Rho ~ lkj_corr_cholesky(2),
+        bA ~ dnorm(0, 1),
+        kappa ~ normal(0, 1.5),
+        
+        # generated quantities: ordinary correlation matrices
+        gq> matrix[2, 2]:Rho <<- Chol_to_Corr(L_Rho)
+        
+    ), data=bangladesh |> dplyr::select(contraception=use.contraception, district_id, urban, age, children=living.children),
+    cores=4, chains=4, log_lik = TRUE
+)
+# Hard to interpret the raw coefficients, so how do the predictions match up?
+precis(m14h3_kids, pars="bA")
+
+models <- list(
+    "Continuous"=m14h2_kids,
+    "Ordinal"=m14h3_kids
+)
+
+# Fix district and urban, as age effect is constant across these
+ndata <- expand_grid(
+    district_id=17, 
+    urban=1,
+    age=seq(min(bangladesh$age)-0.15, max(bangladesh$age)+0.15, length.out=1e3)
+)
+
+# Rather than comparing on the link level, which for the Poisson model gives us 
+# a single rate and for the Ordinal model gives us a probability for each outcome
+# I'll just use the outcome scale which is the same (number of kids)
+preds <- map_dfr(models, function(mod) {
+    outcome <- sim(mod, data=ndata)
+    ndata |> mutate(
+        sim_mean = colMeans(outcome),
+        sim_lower = apply(outcome, 2, PI)[1, ],
+        sim_upper = apply(outcome, 2, PI)[2, ]
+    )
+}, .id="model")
+
+# The plot is rubbish because basically there's a huge amount of variation, which is why it
+# would have been nice to compare on the link-level
+# But the Ordinal method keeps it bounded to within the training set values
+# And never has zeros
+# You can also just about make out the increasing trend in the ordinal model here
+preds |>
+    ggplot(aes(x=age, y=sim_mean, colour=model, fill=model)) +
+        geom_ribbon(aes(ymin=sim_lower, ymax=sim_upper), alpha=0.1) +
+        geom_line() +
+        theme_classic() +
+        theme(
+            legend.position = "bottom"
+        ) +
+        scale_colour_brewer("", palette="Dark2") +
+        scale_fill_brewer("", palette="Dark2") 
+
+# 14H4
+# Predict height given age, clustered by subject
+# with varying intercepts and slopes
+# Is the intercept (i.e. boys starting height) or the slope (i.e. growth rate)
+# contribute more to the measured height?
+data(Oxboys) 
+Oxboys <- as_tibble(Oxboys)
+m14h4 <- ulam(
+    alist(
+        height ~ normal(mu, sigma_obs),
+        mu <- a[Subject] + b[Subject] * age,
+        
+        c(a, b)[Subject] ~ multi_normal(c(a_bar, b_bar), Rho, sigma),
+        a_bar ~ dnorm(0, 1),
+        b_bar ~ dnorm(0, 1),
+        sigma ~ exponential(1),
+        Rho ~ lkj_corr(2),
+        sigma_obs ~ exponential(1)
+    ),
+    data=Oxboys |> dplyr::select(Subject, age, height) |> mutate(height =as.numeric(scale(height))),
+    chains=4, cores=4
+)
+# The starting height (a_bar and sigma[1]) contribute much more variance to the heights
+# than the slopes (b_bar and sigma[2]) as sigma[1] >> sigma[2]
+plot(precis(m14h4, depth=2, pars=c("a_bar", "b_bar", "sigma")))
+
+# 14M5
+# The correlation is moderately strong at 0.56 average
+# This means that boys with a taller starting height, also tend to grow quicker
+precis(m14h4, pars="Rho", depth=3)
+
+# 14M6
+# Want to simulate a new cohort of boys using the posteriors from
+# the model
+# The question says can ignore uncertainty in the posterior and just use
+# the mean values, but it's only one extra loop to use the full posterior
+post <- extract.samples(m14h4)
+
+# This function will return a tibble containing simulated growth rates
+# for one boy
+simulate_boy <- function(boy_id, ages=seq(-1, 1, length.out=9)) {
+    # Could vectorise most of this, it's just converting sigmas and 3D Rho array
+    # into 3D covariance matrix and passing this into mvrnorm that I'm not sure how
+    # to vectorise.
+    map_dfr(1:2000, function(s) {
+        # Get group level parameters
+        abar <- post$a_bar[s, 1]
+        bbar <- post$b_bar[s, 1]
+        # Reconstruct covariance matrix
+        sigmas <- post$sigma[s, ]
+        Sigma <- diag(sigmas) %*% post$Rho[s, , ] %*% diag(sigmas)
+        # Draw individual slope and intercept
+        params <- MASS::mvrnorm(n=1, mu=c(abar, bbar), Sigma)
+        tibble(
+            sample=s,
+            age=ages,
+            height=params[1] + params[2] * ages
+        )
+    })
+}
+
+# Want to simulate 10 boys and plot their growth charts
+res <- map_dfr(1:10, simulate_boy, .id="boy")
+
+# Calculate average and PIs and plot
+# Ah... by trying to be clever and incorporating the uncertainty in the posterior,
+# It's effectively just plotted 2,000 boys growth summarized 10 times
+# As could think of each of the 2,000 growh curves per facet as 1 simulated boy
+res |>
+    group_by(boy, age) |>
+    summarise(
+        height_mean = mean(height),
+        height_lower = PI(height)[1],
+        height_upper = PI(height)[2]
+    ) |>
+    ungroup() |>
+    ggplot(aes(x=age, y=height_mean, group=boy)) +
+        geom_ribbon(aes(ymin=height_lower, ymax=height_upper), alpha=0.3) +
+        facet_wrap(~boy) +
+        geom_line() +
+        theme_classic()
+
+# So let's change the code to do this, and also to add the observation noise back on
+# so it looks like an observed growth curve
+simulate_boy_2 <- function(boy_id, ages=seq(-1, 1, length.out=9)) {
+    # Get group level parameters
+    abar <- post$a_bar[boy_id, 1]
+    bbar <- post$b_bar[boy_id, 1]
+    # Reconstruct covariance matrix
+    sigmas <- post$sigma[boy_id, ]
+    Sigma <- diag(sigmas) %*% post$Rho[boy_id, , ] %*% diag(sigmas)
+    # Draw individual slope and intercept
+    params <- MASS::mvrnorm(n=1, mu=c(abar, bbar), Sigma)
+    mu <- params[1] + params[2] * ages
+    heights <- rnorm(length(mu), mu, post$sigma_obs[boy_id])
+    tibble(
+        sample=s,
+        age=ages,
+        height=heights
+    )
+}
+
+res <- map_dfr(1:10, simulate_boy_2, .id="boy")
+# That looks more realistic! Note now we don't have any uncertainty
+# The book recommended using the MEAN posterior for this, so that the inter-boy
+# variance will only come from the MVR norm draw
+# Whereas I'm just using sequential draws from the posterior here so I have
+# that element of additional variation, BUT I'm not quantifying the uncertainty per new boy
+res |>
+    ggplot(aes(x=age, y=height, group=boy)) +
+        facet_wrap(~boy) +
+        geom_line() +
+        theme_classic()
+
 # Ask Richard -------------------------------------------------------------
 
 # When to use multi-level prior and when to use multivariate?
@@ -962,5 +1886,11 @@ tibble(
 # Or even a double-level prior, so that get treatment effects have their own dist per actor
 # and actors have their own dist
 
-# Why is D a competing cause in Week 7 HW Q2 and can be included?
+# Do we still get partial pooling when using MVN with 0 mean? i.e. not pooling info
+# on intercept or slope, at least not in the mean
 
+# Does it make a difference if we use 2D varying intercept model, or intercept (assumes baseline)
+# and slope (takes the adjustment)?
+
+# For 14H6, how would you quantify the uncertainty of each new simulated boy rather than
+# just using the mean posterior?
