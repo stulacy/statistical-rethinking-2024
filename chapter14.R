@@ -552,7 +552,7 @@ g_df <- g_df |> pivot_longer(-sample, names_pattern="H([0-9]+)", names_to="house
 comb_df <- r_df |> inner_join(g_df, by=c("sample", "house"))
 comb_df |>
     ggplot(aes(x=exp(receiving), y=exp(giving), group=house)) +
-        geom_density_2d(bins=10)
+        geom_density_2d(bins=2)
 
 # Visualising dyad effects
 # Fair amount of variance amongst dyad effects
