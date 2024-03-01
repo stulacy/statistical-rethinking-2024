@@ -416,7 +416,7 @@ res |>
 
 # Question 4 --------------------------------------------------------------
 # Adding factions!
-# So this will be another varying-effects term with a giving and receing column for each of the
+# So this will be another varying-effects term with a giving and receiving column for each of the
 # 4 factions
 # I'll use my four-way model for this
 # Firstly add factions to the dataset
@@ -427,7 +427,11 @@ Monk_factions <- tibble(
 Monks <- Monks |>
     inner_join(Monk_factions |> rename(faction_A=Faction), by=c("A"="MonkID")) |>
     inner_join(Monk_factions |> rename(faction_B=Faction), by=c("B"="MonkID"))
-m_q4 <- ulam(
+
+# Firstly combine dyads into a single matrix for individuals
+# This will allow correlations between if a dyad are more likely to give likes then they are
+# less likely to give dislikes, which would expect
+m_q4_a <- ulam(
     alist(
         # I think can use the same kappa here since it's symmetric
         like_AB ~ ordered_logistic(phiAB_l, kappa_l),
@@ -439,10 +443,10 @@ m_q4 <- ulam(
         #  - how many likes A likes to give away in general (likes_gr[A, 1])
         #  - how many likes B tends to receive in general (likes_gr[B, 2])
         #  - the specific number of likes from A to B (d[dyad_id, 1])
-        phiAB_l <- a + likes_gr[A, 1] + likes_gr[B, 2] + faction_gr[faction_A, 1] + faction_gr[faction_B, 2] + dyl[dyad_id, 1],
-        phiBA_l <- a + likes_gr[B, 1] + likes_gr[A, 2] + faction_gr[faction_B, 1] + faction_gr[faction_A, 2] + dyl[dyad_id, 2],
-        phiAB_d <- b + likes_gr[A, 3] + likes_gr[B, 4] + faction_gr[faction_A, 3] + faction_gr[faction_B, 4] + dyd[dyad_id, 1],
-        phiBA_d <- b + likes_gr[B, 3] + likes_gr[A, 4] + faction_gr[faction_B, 3] + faction_gr[faction_A, 4] + dyd[dyad_id, 2],
+        phiAB_l <- a + likes_gr[A, 1] + likes_gr[B, 2] +  dyi[dyad_id, 1],
+        phiBA_l <- a + likes_gr[B, 1] + likes_gr[A, 2] +  dyi[dyad_id, 2],
+        phiAB_d <- b + likes_gr[A, 3] + likes_gr[B, 4] +  dyi[dyad_id, 3],
+        phiBA_d <- b + likes_gr[B, 3] + likes_gr[A, 4] +  dyi[dyad_id, 4],
         a ~ normal(0, 1),
         b ~ normal(0, 1),
         kappa_l ~ normal(0, 1.5),
@@ -460,35 +464,18 @@ m_q4 <- ulam(
         cholesky_factor_corr[4]:L_Rho_l ~ lkj_corr_cholesky(4),
         vector[4]:sigma_l ~ exponential(1),
         
-        # Faction matrix
-        transpars> matrix[4, 4]:faction_gr <-
-            compose_noncentered(sigma_fac, L_Rho_fac, z_fac),
-        matrix[4, 4]:z_fac ~ normal(0, 1),
-        # Relatively broad prior
-        cholesky_factor_corr[4]:L_Rho_fac ~ lkj_corr_cholesky(4),
-        vector[4]:sigma_fac ~ exponential(1),
-        
         # dyad effects - non-centered
         # Have 153 dyads
-        transpars> matrix[153, 2]:dyl <-
-            compose_noncentered(rep_vector(sigma_dyl, 2), L_Rho_dyl, z_dyl),
-        matrix[2, 153]:z_dyl ~ normal(0, 1),
+        transpars> matrix[153, 4]:dyi <-
+            compose_noncentered(rep_vector(sigma_dyi, 4), L_Rho_dyi, z_dyi),
+        matrix[4, 153]:z_dyi ~ normal(0, 1),
         # Relatively broad prior
-        cholesky_factor_corr[2]:L_Rho_dyl ~ lkj_corr_cholesky(4),
-        sigma_dyl ~ exponential(1),
-        
-        # Dyads for dislikes
-        transpars> matrix[153, 2]:dyd <-
-            compose_noncentered(rep_vector(sigma_dyd, 2), L_Rho_dyd, z_dyd),
-        matrix[2, 153]:z_dyd ~ normal(0, 1),
-        cholesky_factor_corr[2]:L_Rho_dyd ~ lkj_corr_cholesky(4),
-        sigma_dyd ~ exponential(1),
+        cholesky_factor_corr[4]:L_Rho_dyi ~ lkj_corr_cholesky(4),
+        sigma_dyi ~ exponential(1),
         
         # compute centered correlation matrix for dyad effects
-        gq> matrix[2,2]:Rho_dyl <<- Chol_to_Corr(L_Rho_dyl),
-        gq> matrix[2,2]:Rho_dyd <<- Chol_to_Corr(L_Rho_dyd),
-        gq> matrix[4,4]:Rho_l <<- Chol_to_Corr(L_Rho_l),
-        gq> matrix[4,4]:Rho_fac <<- Chol_to_Corr(L_Rho_fac)
+        gq> matrix[4,4]:Rho_dyi <<- Chol_to_Corr(L_Rho_dyi),
+        gq> matrix[4,4]:Rho_l <<- Chol_to_Corr(L_Rho_l)
     ),
     # NB: for ordered logistic the outcome must be positive, think factor levels
     data=Monks |> mutate(
@@ -499,15 +486,104 @@ m_q4 <- ulam(
     ),
     chains=4, cores=4, iter=2000
 )
-# Not much correlation between the factions!
-precis(m_q4, pars=c("Rho_fac", "sigma_fac"), depth=4)
+# Strongest correlation is still the reciprocity, i.e. if A gives B likes then B gives likes to A
+# If A gives likes to B (col 1), then this somehow has a positive correlation with A giving dislikes to B (col 3), although the CI covers 0
+# The only correlations that don't cross 0 are the reciprocity of likes (1-2) and dislikes (3-4)
+plot(precis(m_q4_a, pars=c("Rho_dyi"), depth=3))
+
+# Now add in the faction dyad
+# Since need to have at least a 2D matrix (one dimension for each individual's faction), I could either add
+# 4, 4x4 matrices, or 1 4x4 matrix. If I had 4 it would be the usual effect of A giving B likes, receiving likes, B giving A likes & receiving likes
+# If I use a single 4x4 matrix it's a simplified way of saying "how good is the relationship between B & A" and assumes that the effects are symmetrical
+# (i.e. A -> B has the same effect of B -> A), and also mirrored (dislikes are equivalent to negative likes)
+# I'll write it as 2 2Ds, so fac_likes[fac_a, fac_b] is effect of A giving B likes, while fac_likes[fac_b, fac_a] is B giving A likes
+# And then I'll have a separate matrix for dislikes
+# This means there's no mechanism for receiving effects, but that's ok as that's basically the same
+m_q4_b <- ulam(
+    alist(
+        # I think can use the same kappa here since it's symmetric
+        like_AB ~ ordered_logistic(phiAB_l, kappa_l),
+        like_BA ~ ordered_logistic(phiBA_l, kappa_l),
+        dislike_AB ~ ordered_logistic(phiAB_d, kappa_d),
+        dislike_BA ~ ordered_logistic(phiBA_d, kappa_d),
+        # So the number of likes from A->B is a function of:
+        #  - overall mean likes (a)
+        #  - how many likes A likes to give away in general (likes_gr[A, 1])
+        #  - how many likes B tends to receive in general (likes_gr[B, 2])
+        #  - the specific number of likes from A to B (d[dyad_id, 1])
+        phiAB_l <- a + likes_gr[A, 1] + likes_gr[B, 2] +  dyi[dyad_id, 1] + facs_likes[faction_A, faction_B],
+        phiBA_l <- a + likes_gr[B, 1] + likes_gr[A, 2] +  dyi[dyad_id, 2] + facs_likes[faction_B, faction_A],
+        phiAB_d <- b + likes_gr[A, 3] + likes_gr[B, 4] +  dyi[dyad_id, 3] + facs_dislikes[faction_A, faction_B],
+        phiBA_d <- b + likes_gr[B, 3] + likes_gr[A, 4] +  dyi[dyad_id, 4] + facs_dislikes[faction_B, faction_A],
+        a ~ normal(0, 1),
+        b ~ normal(0, 1),
+        kappa_l ~ normal(0, 1.5),
+        kappa_d ~ normal(0, 1.5),
+        
+        # likes matrix of varying effects. 
+        # first col is how many likes monk A gives away
+        # second column is how many likes B receives
+        # third col is how many dislikes A gives away
+        # third col is how many dislikes A receives
+        transpars> matrix[18, 4]:likes_gr <-
+            compose_noncentered(sigma_l, L_Rho_l, z_l),
+        matrix[4, 18]:z_l ~ normal(0, 1),
+        # Relatively broad prior
+        cholesky_factor_corr[4]:L_Rho_l ~ lkj_corr_cholesky(4),
+        vector[4]:sigma_l ~ exponential(1),
+        
+        # dyad effects - non-centered
+        # Have 153 dyads
+        transpars> matrix[153, 4]:dyi <-
+            compose_noncentered(rep_vector(sigma_dyi, 4), L_Rho_dyi, z_dyi),
+        matrix[4, 153]:z_dyi ~ normal(0, 1),
+        # Relatively broad prior
+        cholesky_factor_corr[4]:L_Rho_dyi ~ lkj_corr_cholesky(4),
+        sigma_dyi ~ exponential(1),
+        
+        # faction matrices - non-centered
+        transpars> matrix[4, 4]:facs_likes <-
+            compose_noncentered(rep_vector(sigma_fl, 4), L_Rho_fl, z_fl),
+        matrix[4, 4]:z_fl ~ normal(0, 1),
+        cholesky_factor_corr[4]:L_Rho_fl ~ lkj_corr_cholesky(4),
+        sigma_fl ~ exponential(1),
+        # faction dislikes
+        transpars> matrix[4, 4]:facs_dislikes <-
+            compose_noncentered(rep_vector(sigma_fd, 4), L_Rho_fd, z_fd),
+        matrix[4, 4]:z_fd ~ normal(0, 1),
+        cholesky_factor_corr[4]:L_Rho_fd ~ lkj_corr_cholesky(4),
+        sigma_fd ~ exponential(1),
+        
+        # compute centered correlation matrix for dyad effects
+        gq> matrix[4,4]:Rho_dyi <<- Chol_to_Corr(L_Rho_dyi),
+        gq> matrix[4,4]:Rho_fl <<- Chol_to_Corr(L_Rho_fl),
+        gq> matrix[4,4]:Rho_fd <<- Chol_to_Corr(L_Rho_fd),
+        gq> matrix[4,4]:Rho_l <<- Chol_to_Corr(L_Rho_l)
+    ),
+    # NB: for ordered logistic the outcome must be positive, think factor levels
+    data=Monks |> mutate(
+        like_AB = like_AB + 1,
+        like_BA = like_BA + 1,
+        dislike_AB = dislike_AB + 1,
+        dislike_BA = dislike_BA + 1,
+    ),
+    chains=4, cores=4, iter=2000
+)
+
+# Here's the faction effects
+# As expected, factions tend to give each other more likes ([1,1], [2,2], [3,3]), except for Faction 4 whose effect is zero.
+# Every other faction is less likely to give Faction 1 likes ([1,1] down to [4,1])
+# But this isn't necessarily the case for every faction, i.e. Faction 4 give a lot of likes to Faction 2
+# And while Faction 4 doesn't give likes to Faction 1, faction 1 is less likely to give Faction 4 likes and is pretty average for
+# everyone else, so maybe there's a bit of a frosty relationship here
+plot(precis(m_q4_b, pars=c("facs_likes", "facs_dislikes"), depth=4))
 
 # Does that change the monk's likeability?
 models <- list(
     "Separate"=m_q2_a,
     "Four-way"=m_q2_b,
     "Three-way"=m_q2_c,
-    "Factions"=m_q4
+    "Factions"=m_q4_b
 )
 
 # Extract from posterior
@@ -548,16 +624,3 @@ res |>
 res |>
     group_by(model) |>
     top_n(1, dislikeability_mean)
-
-# This shows the amount of giving/receiving to members within the same faction
-# I don't understand what's happened here as it's all negative...
-# This even seems to suggest that all factions give and receive the same
-precis(m_q4, pars="faction_gr", depth=3)
-
-# AH! I've messed this up
-# This should be a dyad from each faction to each faction
-# Instead I have just average faction likes/dislikes sent/received
-
-# TODO 
-# Combine individual level dyads into single matrix
-# Then do the same but indexed by faction rather than individual
