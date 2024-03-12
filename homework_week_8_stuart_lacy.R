@@ -199,7 +199,7 @@ precis(dislike_minus_like_dyad)
 # I mentioned I was going to try 2 more models:
 #   - A 4-column matrix with giving out likes, giving out dislikes, receiving likes, receiving dislikes
 #   - A 3-column matrix with giving out likes, giving out dislikes, receiving likes
-# I'll fit these extra mddels now and see if they agree on the most liked/disliked individuals
+# I'll fit these extra models now and see if they agree on the most liked/disliked individuals
 m_q2_b <- ulam(
     alist(
         # I think can use the same kappa here since it's symmetric
@@ -570,13 +570,20 @@ m_q4_b <- ulam(
     chains=4, cores=4, iter=2000
 )
 
+# Look at the correlation between dyads (the like reciprocity in Rho_dyi[2, 1])
+# This shrinks from 0.64 to 0.14 when adding factions, suggesting factions explain a lot of the variance in likes
+precis(m_q4_a, pars=c("Rho_dyi"), depth=4)
+precis(m_q4_b, pars=c("Rho_dyi"), depth=4)
+
 # Here's the faction effects
 # As expected, factions tend to give each other more likes ([1,1], [2,2], [3,3]), except for Faction 4 whose effect is zero.
 # Every other faction is less likely to give Faction 1 likes ([1,1] down to [4,1])
-# But this isn't necessarily the case for every faction, i.e. Faction 4 give a lot of likes to Faction 2
+# But this isn't necessarily the case for every faction, i.e. Faction 4 give a lot of likes to Faction 2, moreso than it gives itself!
 # And while Faction 4 doesn't give likes to Faction 1, faction 1 is less likely to give Faction 4 likes and is pretty average for
 # everyone else, so maybe there's a bit of a frosty relationship here
-plot(precis(m_q4_b, pars=c("facs_likes", "facs_dislikes"), depth=4))
+plot(precis(m_q4_b, pars=c("facs_likes"), depth=4))
+
+plot(precis(m_q4_b, pars=c("facs_dislikes"), depth=4))
 
 # Does that change the monk's likeability?
 models <- list(
